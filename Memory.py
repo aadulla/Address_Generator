@@ -82,6 +82,8 @@ class Memory:
         self.read_forward_buffer = None
         self.write_backward_buffer = None
         self.write_forward_buffer = None
+
+        self.prev_loop_counters = None
     
         
     """
@@ -91,6 +93,7 @@ class Memory:
     def clear_memory(self):
         for i in range(len(self.memory_array)):
             self.memory_array[i] = None
+        self.curr_op_space_start_ptr = -1
             
     """
     "initialize" lays out data into the memory_array in row-major order
@@ -157,7 +160,7 @@ class Memory:
                             the last element in the 1D list corresponds to the innermost dimension 
                             in that loop block
     """
-    def prefetch(self, delta, loop_counters, prev_loop_counters, loop_order_lst):
+    def prefetch(self, delta, loop_counters, loop_order_lst):
         # get the loop counter dimension that addresses the individual indicies inside a mini memory
         my_lowest_dim, my_lowest_op_space_size = list(self.dim_map[-1].items())[0]
         
@@ -173,7 +176,7 @@ class Memory:
         
         # no change in op_space
         if delta == 0:
-            pass
+            return
         
         # no data can be reused so we need to write back all the data currently in the memory and
         # then prefetch everything from the parent memory--this handles the case of prefetches
@@ -181,14 +184,14 @@ class Memory:
         elif delta is None:
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1: 
-                self.write_back_op_space(prev_loop_counters)
-                self.delta_loop_counters = None
+                self.write_back_op_space()
 
             # prefetch everything new from parent
             num_to_prefetch = self.op_space_size // len(self.mini_memory_lst)
             self.positive_delta_prefetch(num_to_prefetch, None, loop_counters, True)
             self.curr_op_space_start_ptr = 0
             self.curr_op_space_end_ptr = 0
+            self.prev_loop_counters = copy.deepcopy(loop_counters)
 
             return 1
         
@@ -197,14 +200,14 @@ class Memory:
         elif my_lowest_dim != parent_lowest_dim or my_lowest_dim == "channel" or parent_lowest_dim == "channel":
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1:
-                self.write_back_op_space(prev_loop_counters)
-                self.delta_loop_counters = None
+                self.write_back_op_space()
 
             # prefetch everything new from parent
             num_to_prefetch = self.op_space_size // len(self.mini_memory_lst)
             self.positive_delta_prefetch(num_to_prefetch, None, loop_counters, True)
             self.curr_op_space_start_ptr = 0
             self.curr_op_space_end_ptr = 0
+            self.prev_loop_counters = copy.deepcopy(loop_counters)
 
             return 1
         
@@ -219,35 +222,37 @@ class Memory:
             if abs(delta) > my_lowest_op_space_size:
                 # check if memory array is not empty
                 if self.curr_op_space_start_ptr != -1: 
-                    self.write_back_op_space(prev_loop_counters)
-                    self.delta_loop_counters = None
+                    self.write_back_op_space()
 
                 # prefetch everything new from parent
                 self.positive_delta_prefetch(self.op_space_size, None, loop_counters, True)
                 self.curr_op_space_start_ptr = 0
                 self.curr_op_space_end_ptr = 0
+                self.prev_loop_counters = copy.deepcopy(loop_counters)
 
                 return 1
             
             # negative delta prefetch (i.e. we move our sub-subspace backward in the subspace)
             elif delta < 0:
                 num_to_prefetch = abs(delta)
-                self.negative_delta_prefetch(num_to_prefetch, prev_loop_counters, loop_counters, False)
+                self.negative_delta_prefetch(num_to_prefetch, self.prev_loop_counters, loop_counters, False)
                    
                 # need to adjust ptrs in actual memory object
                 self.curr_op_space_start_ptr = (self.curr_op_space_start_ptr + delta) % self.memory_size
                 self.curr_op_space_end_ptr = (self.curr_op_space_end_ptr + delta) % self.memory_size
+                # self.prev_loop_counter = copy.deepcopy(loop_counters)
 
                 return 0
                 
             # positive delta prefetch (i.e we move our sub-subspace forward in the subspace)
             elif delta > 0 and delta < self.mini_memory_lst[0].op_space_size:
                 num_to_prefetch = abs(delta)
-                self.positive_delta_prefetch(num_to_prefetch, prev_loop_counters, loop_counters, False)
+                self.positive_delta_prefetch(num_to_prefetch, self.prev_loop_counters, loop_counters, False)
                 
                 # need to adjust ptrs in actual memory object
                 self.curr_op_space_start_ptr = (self.curr_op_space_start_ptr + delta) % self.memory_size
                 self.curr_op_space_end_ptr = (self.curr_op_space_end_ptr + delta) % self.memory_size
+                # self.prev_loop_counter = copy.deepcopy(loop_counters)
 
                 return 0
                 
@@ -290,7 +295,6 @@ class Memory:
                         is being written in
     """
     def write_backward(self, my_memory_idx, write_request):
-        # if self.memory_type == "output": print(write_request)
         # check if we should write back
         if self.should_write_back:
             # update trace queue
@@ -392,7 +396,7 @@ class Memory:
                             of data from the parent memory. The pointers in the memory and its mini
                             memories were initialized with reference to these loop counters
     """
-    def write_back_op_space(self, prev_loop_counters):
+    def write_back_op_space(self):
         my_memory_idxs, parent_memory_requests = [], []
         
         # iterate through each mini memory and get the indices (my_memory_idxs) of the data to 
@@ -400,7 +404,7 @@ class Memory:
         # indices map to
         for i, mini_memory in enumerate(self.mini_memory_lst):
             tmp_memory_idxs, tmp_parent_memory_idxs = mini_memory.write_back_op_space()
-            tmp_parent_memory_requests = self.convert_idxs_to_requests(i, tmp_parent_memory_idxs, prev_loop_counters)
+            tmp_parent_memory_requests = self.convert_idxs_to_requests(i, tmp_parent_memory_idxs, self.prev_loop_counters)
             my_memory_idxs.extend(tmp_memory_idxs)
             parent_memory_requests.extend(tmp_parent_memory_requests)
             
@@ -509,10 +513,10 @@ class Memory:
     "print_stats" prints information about the memory accesses
     params: None
     """ 
-    def print_stats(self):
-        print("Read Count:", self.read_count)
-        print("Write Count:", self.write_count)
-        print("Cost:", self.calc_cost())
+    def print_stats(self, pad=""):
+        print(pad + "Read Count: " + str(self.read_count))
+        print(pad +  "Write Count: " + str(self.write_count))
+        print(pad + "Cost: " +  str(self.calc_cost()))
 
 """
 "InputMemory" is a subclass of memory designed specifcally to interface with input data
@@ -965,6 +969,9 @@ class OutputMemory(Memory):
         
         super().__init__("output", memory_size, op_space_size, level, trace_queue, cost, should_write_back, write_back_policy)
         self.dependency_set = {"filter", "output"}
+
+        # only applicable for L0 memory
+        self.prev_memory_array = [None]*memory_size
         
         self.dim_map = []
         for dim in upper_dim_map:
@@ -1047,4 +1054,15 @@ class OutputMemory(Memory):
                 self.read_backward(my_memory_idx, read_request)
                 
                 curr_mini_memory.increment_ptrs(is_static)
-        
+
+        self.prev_memory_array = copy.deepcopy(self.memory_array)
+
+    def write_backward(self, my_memory_idx, write_request):
+        # if L0 memory, then write back delta
+        if self.level == 0:
+            new_val = self.memory_array[my_memory_idx]
+            old_val = self.prev_memory_array[my_memory_idx]
+            delta_val = new_val - old_val
+            self.memory_array[my_memory_idx] = delta_val
+
+        super().write_backward(my_memory_idx, write_request)

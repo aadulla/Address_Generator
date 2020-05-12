@@ -11,7 +11,29 @@ class Tester:
     def __init__(self):
         pass
 
-    def setup(self, loop_tiling_lst, costs, expansion_factor, write_backs, debug=False):
+    def prefetch_experiment(self, factor):
+        num_tiles = len(self.loop_tiling_lst)
+
+        base_factor = factor**(num_tiles-1)
+        for dim_dict in self.loop_tiling_lst[0]:
+            for key, val in dim_dict.items():
+                dim_dict[key] = int(val/base_factor)
+
+        for tile in self.loop_tiling_lst[1:]:
+            for dim_dict in tile:
+                for key, val in dim_dict.items():
+                    dim_dict[key] = int(val*factor)
+
+
+    def setup(self, 
+              loop_tiling_lst, 
+              costs, 
+              expansion_factor, 
+              write_backs, 
+              prefetch_factor=None,
+              parallel_for_dims=None,
+              debug=False):
+
         num_channels = 1
         num_filters = 1
         num_weights = 1
@@ -99,8 +121,14 @@ class Tester:
         self.loop_tiling_lst = loop_tiling_lst
         self.costs = costs
         self.write_backs = write_backs
+        self.parallel_for_dims = parallel_for_dims
         self.debug = debug
-    
+
+        # print("Before", self.loop_tiling_lst)
+        # if prefetch_factor is not None and prefetch_factor != 0:
+        #     self.prefetch_experiment(prefetch_factor)
+        # print("After", self.loop_tiling_lst)
+
     def test_software(self):
         
         input_data = copy.deepcopy(self.input_data)
@@ -110,7 +138,7 @@ class Tester:
         # create the controller
         self.sw_controller = Controller(self.input_memory_sizes[1:], self.weight_memory_sizes[1:], self.output_memory_sizes[1:],
                                         input_data, weight_data, output_data,
-                                        self.loop_tiling_lst, self.costs, self.write_backs)
+                                        self.loop_tiling_lst, self.costs, self.write_backs, self.parallel_for_dims)
         
         self.sw_controller.print_loop()
         
@@ -139,13 +167,22 @@ class Tester:
             print("="*100)
             print()
             self.sw_controller.print_stats()
+
+            input_memory_trace_queue  = self.sw_controller.input_trace_queue
+            weight_memory_trace_queue = self.sw_controller.weight_trace_queue
+            output_memory_trace_queue  = self.sw_controller.output_trace_queue
+            print("Input Trace Length:",  len(input_memory_trace_queue))
+            print("Weight Trace Length:", len(weight_memory_trace_queue))
+            print("Output Trace Length:", len(output_memory_trace_queue))
+            print()
+
         else:
             print("Failed Correctness Check")
             print("="*100)
             print("="*100)
             print()
             print("Expected Output:")
-            print(true_output)
+            print(true_output_data)
             print()
             print("Controller Output:")
             print(controller_output)

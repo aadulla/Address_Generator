@@ -145,9 +145,6 @@ class Controller_Manager:
             weight_stop_condition = stop_conditions_dict["weight"]
             output_stop_condition = stop_conditions_dict["output"]
 
-            print(self.input_memory_trace_queue.curr_size)
-
-
             assert input_stop_condition == weight_stop_condition == output_stop_condition
 
             if input_stop_condition == "BARRIER":

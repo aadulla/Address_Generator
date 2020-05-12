@@ -4,6 +4,7 @@ import math
 import random
 
 from Hierarchy import Hierarchy
+from RegisterFile import RegisterFile
 from Memory import InputMemory
 from Memory import WeightMemory
 from Memory import OutputMemory
@@ -116,7 +117,7 @@ class Controller:
                 write_back_policy = "overwrite"
             else:
                 should_write_back = False
-                write_back_policy = None
+                write_back_policy = "overwrite"
 
             level = num_levels - i - 1
             
@@ -248,9 +249,10 @@ class Controller:
     def __init__(self, 
                  input_memory_sizes, weight_memory_sizes, output_memory_sizes,
                  input_data, weight_data, output_data,
-                 loop_tiling_lst, costs, write_backs):
+                 loop_tiling_lst, costs, write_backs, parallel_for_dims):
         
         self.write_backs = write_backs
+        self.parallel_for_dims = parallel_for_dims
         self.num_levels = len(input_memory_sizes)
         
         self.loop_order_lst  = []
@@ -381,13 +383,84 @@ class Controller:
                                                                  "output") 
         output_hierarchy_lst.insert(0, output_base_memory)
         self.output_memory_hierarchy = Hierarchy(output_hierarchy_lst)
+
+        # change L1 output memory to increment policy so can captures delta from L0 computations
+        self.output_memory_hierarchy[-2].write_back_policy = "increment"
         
         # initialize loop_counters and prev_loop_counters
         self.loop_counters = []
-        self.prev_loop_counters = []
+        # self.prev_loop_counters = []
         for level in self.loop_order_lst:
             self.loop_counters.append({"channel": 0, "filter": 0, "weight": 0, "output": 0})
-            self.prev_loop_counters.append({"channel": 0, "filter": 0, "weight": 0, "output": 0})
+            # self.prev_loop_counters.append({"channel": 0, "filter": 0, "weight": 0, "output": 0})
+
+        # initialize parallel unrolling
+        self.initialize_parallel_unrolling()
+
+    def initialize_parallel_unrolling(self):
+        # check if we should do parallel unrolling
+        if self.parallel_for_dims is None: return
+
+        # get number of PEs in PE array
+        # parallel unroll the second to last tile because each PE has its own RFile to do the last tile
+        self.num_PEs = 1
+        for dim in self.parallel_for_dims:
+            L1_tile_size = self.tilings_dict[dim][-2]
+            self.num_PEs *= L1_tile_size
+
+        # create loop counter assignment for each PE
+        # assign specific iteration to each PE based on second to last tile dim indices
+        PE_loop_counter_dict = dict()
+        for dim in self.parallel_for_dims:
+            PE_loop_counter_dict.update({dim: None})
+
+        self.loop_counter_asst_lst = []
+        for i in range(self.num_PEs):
+            self.loop_counter_asst_lst.append(copy.deepcopy(PE_loop_counter_dict))
+
+        stride = 1
+        for dim in reversed(self.parallel_for_dims):
+            L1_tile_size = self.tilings_dict[dim][-2]
+            for i in range((self.num_PEs//L1_tile_size)//stride):
+                for j in range(L1_tile_size):
+                    for k in range(stride):
+                        self.loop_counter_asst_lst[i*L1_tile_size*stride + j*stride + k][dim] = j
+            stride *= L1_tile_size
+
+        # e.g 
+        # parallel_for_dims: [r, c]
+        # L1_tile_sizes: [r=2, c=3]
+
+        # before:
+        # (r: None, c: None), (r: None, c: None), (r: None, c: None)
+        # (r: None, c: None), (r: None, c: None), (r: None, c: None)
+
+        # after:
+        # (r: 0, c: 0), (r: 0, c: 1), (r: 0, c: 2)
+        # (r: 1, c: 0), (r: 1, c: 1), (r: 1, c: 2)
+
+        # unroll L0 memories in hierarchies
+        self.input_memory_hierarchy.parallel_unroll(self.num_PEs)
+        self.weight_memory_hierarchy.parallel_unroll(self.num_PEs)
+        self.output_memory_hierarchy.parallel_unroll(self.num_PEs)
+
+        # create RFiles from input, weight, and output memories
+        self.RFiles = []
+        for i in range(self.num_PEs):
+            # get L0 memories contained this RFile
+            L0_input_memory  = self.input_memory_hierarchy[-1][i]
+            L0_weight_memory = self.weight_memory_hierarchy[-1][i]
+            L0_output_memory = self.output_memory_hierarchy[-1][i]
+
+            # get loop counter assignment for this RFile
+            loop_counter_asst = self.loop_counter_asst_lst[i]
+
+            # create RFile
+            RFile = RegisterFile(loop_counter_asst,
+                                 L0_input_memory, 
+                                 L0_weight_memory, 
+                                 L0_output_memory)
+            self.RFiles.append(RFile)
 
     def get_weight_prefetch_level(self, loop_order_lst):
         channel_idx = loop_order_lst.index("channel")
@@ -405,6 +478,433 @@ class Controller:
         output_prefetch_level = self.get_output_prefetch_level(loop_order_lst)
         return min(weight_prefetch_level, output_prefetch_level)
 
+    def memory_prefetch_wrapper(self,
+                                memory,
+                                hierarchy_index,
+                                curr_loop_counters, 
+                                prev_loop_counters,
+                                loop_order_lst):
+
+        if prev_loop_counters is None:
+            memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
+
+        else:
+            for dim in memory.dependency_set:
+                if curr_loop_counters[hierarchy_index][dim] != prev_loop_counters[hierarchy_index][dim]:
+                    memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
+
+    def Ln_recursive_simulate(self, hierarchy_index, debug):
+
+        curr_loop_order_lst = self.loop_order_lst[hierarchy_index - 1]
+        prev_loop_counters = None
+
+        # get the memories at the current level
+        input_memory  = self.input_memory_hierarchy[hierarchy_index]
+        weight_memory = self.weight_memory_hierarchy[hierarchy_index]
+        output_memory = self.output_memory_hierarchy[hierarchy_index]
+      
+        input_prev_block_start = 0
+        input_curr_block_start = 0
+        input_delta = 0
+
+        dim_0 = curr_loop_order_lst[0]
+        dim_1 = curr_loop_order_lst[1]
+        dim_2 = curr_loop_order_lst[2]
+        dim_3 = curr_loop_order_lst[3]
+
+        dim_idxs   = {"channel": None, "filter": None, "weight": None, "output": None}
+        dim_totals = {"channel": None, "filter": None, "weight": None, "output": None}
+
+        start = False
+        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst)
+
+        curr_level = 0
+        if curr_level == first_prefetch_level: start = True
+
+        self.loop_counters[hierarchy_index-1][dim_0] = 0
+        self.loop_counters[hierarchy_index-1][dim_1] = 0
+        self.loop_counters[hierarchy_index-1][dim_2] = 0
+        self.loop_counters[hierarchy_index-1][dim_3] = 0
+
+        for idx_0 in range(self.tilings_dict[dim_0][hierarchy_index - 1]):
+            dim_idxs[dim_0] = idx_0
+            dim_totals[dim_0] = 1
+            for tile_0 in self.tilings_dict[dim_0][hierarchy_index:]:
+                dim_totals[dim_0] *= tile_0
+            self.loop_counters[hierarchy_index-1][dim_0] = idx_0
+
+            curr_level = 1
+            if curr_level == first_prefetch_level: start = True
+
+            for idx_1 in range(self.tilings_dict[dim_1][hierarchy_index - 1]):
+                dim_idxs[dim_1] = idx_1
+                dim_totals[dim_1] = 1
+                for tile_1 in self.tilings_dict[dim_1][hierarchy_index:]:
+                    dim_totals[dim_1] *= tile_1
+                self.loop_counters[hierarchy_index-1][dim_1] = idx_1
+              
+                curr_level = 2
+                if curr_level == first_prefetch_level: start = True
+
+                for idx_2 in range(self.tilings_dict[dim_2][hierarchy_index - 1]):
+                    dim_idxs[dim_2] = idx_2
+                    dim_totals[dim_2] = 1
+                    for tile_2 in self.tilings_dict[dim_2][hierarchy_index:]:
+                        dim_totals[dim_2] *= tile_2
+                    self.loop_counters[hierarchy_index-1][dim_2] = idx_2
+
+                    curr_level = 3
+                    if curr_level == first_prefetch_level: start = True
+
+                    for idx_3 in range(self.tilings_dict[dim_3][hierarchy_index - 1]):
+                        dim_idxs[dim_3] = idx_3
+                        dim_totals[dim_3] = 1
+                        for tile_3 in self.tilings_dict[dim_3][hierarchy_index:]:
+                            dim_totals[dim_3] *= tile_3
+                        self.loop_counters[hierarchy_index-1][dim_3] = idx_3
+
+                        channel_idx = dim_idxs["channel"]
+                        filter_idx  = dim_idxs["filter"]
+                        weight_idx  = dim_idxs["weight"]
+                        output_idx  = dim_idxs["output"]
+                      
+                        channel_total = dim_totals["channel"]
+                        filter_total  = dim_totals["filter"]
+                        weight_total  = dim_totals["weight"]
+                        output_total  = dim_totals["output"]
+
+                        # prefetch weight and output memories
+                        self.memory_prefetch_wrapper(weight_memory, 
+                                                     hierarchy_index-1,
+                                                     self.loop_counters,
+                                                     prev_loop_counters,
+                                                     curr_loop_order_lst)
+
+                        self.memory_prefetch_wrapper(output_memory, 
+                                                     hierarchy_index-1,
+                                                     self.loop_counters,
+                                                     prev_loop_counters,
+                                                     curr_loop_order_lst)
+
+                        # calculate input delta
+                        input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
+                        input_delta = input_curr_block_start - input_prev_block_start
+
+                        # check if this is the first time entering this loop block
+                        if start:
+                            # preform a fresh prefetch
+                            is_fresh_prefetch = input_memory.prefetch(None, 
+                                                                      self.loop_counters[hierarchy_index-1],
+                                                                      curr_loop_order_lst)
+
+                        else:
+                            # perform a delta prefetch
+                            is_fresh_prefetch = input_memory.prefetch(input_delta, 
+                                                                      self.loop_counters[hierarchy_index-1],
+                                                                      curr_loop_order_lst)
+
+                        # check if next level is L1 and we are doing a parallel unroll
+                        if (hierarchy_index+1 == self.num_levels) and (self.parallel_for_dims is not None):
+                            self.L0_parallel_simulate(hierarchy_index+1, debug)
+
+                        # check if next level is L0
+                        elif (hierarchy_index+1 == self.num_levels+1):
+                            L0_input_memory = self.input_memory_hierarchy[-1]
+                            L0_weight_memory = self.weight_memory_hierarchy[-1]
+                            L0_output_memory = self.output_memory_hierarchy[-1]
+                            self.L0_compute(hierarchy_index+1, debug, self.loop_counters,
+                                            L0_input_memory, L0_weight_memory, L0_output_memory)
+
+                        # just do normal level recursion
+                        else:
+                            self.Ln_recursive_simulate(hierarchy_index+1, debug)
+
+                        input_prev_block_start = input_curr_block_start
+                        start = False
+
+                        prev_loop_counters = copy.deepcopy(self.loop_counters)
+      
+        # perform write backs 
+        if "input" in self.write_backs:
+            input_memory.write_back_op_space()
+        if "weight" in self.write_backs:
+            weight_memory.write_back_op_space()
+        if "output" in self.write_backs:
+            output_memory.write_back_op_space()
+          
+        return
+
+    def L0_parallel_simulate(self, hierarchy_index, debug):
+
+        curr_loop_order_lst = self.loop_order_lst[hierarchy_index - 1]
+        prev_loop_counters = None
+
+        dim_0 = curr_loop_order_lst[0]
+        dim_1 = curr_loop_order_lst[1]
+        dim_2 = curr_loop_order_lst[2]
+        dim_3 = curr_loop_order_lst[3]
+
+        dim_idxs   = {"channel": None, "filter": None, "weight": None, "output": None}
+        dim_totals = {"channel": None, "filter": None, "weight": None, "output": None}
+
+        start = False
+        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst)
+      
+        self.loop_counters[hierarchy_index-1][dim_0] = 0
+        self.loop_counters[hierarchy_index-1][dim_1] = 0
+        self.loop_counters[hierarchy_index-1][dim_2] = 0
+        self.loop_counters[hierarchy_index-1][dim_3] = 0
+
+        curr_level = 0
+        if curr_level == first_prefetch_level: start = True
+
+        if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_0 = 1
+        else: num_iters_dim_0 = self.tilings_dict[dim_0][hierarchy_index - 1]
+
+        for idx_0 in range(num_iters_dim_0):
+            dim_idxs[dim_0] = idx_0
+            dim_totals[dim_0] = 1
+            for tile_0 in self.tilings_dict[dim_0][hierarchy_index:]:
+                dim_totals[dim_0] *= tile_0
+            self.loop_counters[hierarchy_index-1][dim_0] = idx_0
+
+            curr_level = 1
+            if curr_level == first_prefetch_level: start = True
+          
+            if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_1 = 1
+            else: num_iters_dim_1 = self.tilings_dict[dim_1][hierarchy_index - 1]
+
+            for idx_1 in range(num_iters_dim_1):
+                dim_idxs[dim_1] = idx_1
+                dim_totals[dim_1] = 1
+                for tile_1 in self.tilings_dict[dim_1][hierarchy_index:]:
+                    dim_totals[dim_1] *= tile_1
+                self.loop_counters[hierarchy_index-1][dim_1] = idx_1
+              
+                curr_level = 2
+                if curr_level == first_prefetch_level: start = True
+              
+                if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_2 = 1
+                else: num_iters_dim_2 = self.tilings_dict[dim_2][hierarchy_index - 1]
+
+                for idx_2 in range(num_iters_dim_2):
+                    dim_idxs[dim_2] = idx_2
+                    dim_totals[dim_2] = 1
+                    for tile_2 in self.tilings_dict[dim_2][hierarchy_index:]:
+                        dim_totals[dim_2] *= tile_2
+                    self.loop_counters[hierarchy_index-1][dim_2] = idx_2
+
+                    curr_level = 3
+                    if curr_level == first_prefetch_level: start = True
+                  
+                    if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_3 = 1
+                    else: num_iters_dim_3 = self.tilings_dict[dim_3][hierarchy_index - 1]
+
+                    for idx_3 in range(num_iters_dim_3):
+                        dim_idxs[dim_3] = idx_3
+                        dim_totals[dim_3] = 1
+                        for tile_3 in self.tilings_dict[dim_3][hierarchy_index:]:
+                            dim_totals[dim_3] *= tile_3
+                        self.loop_counters[hierarchy_index-1][dim_3] = idx_3
+                      
+                        channel_total = dim_totals["channel"]
+                        filter_total  = dim_totals["filter"]
+                        weight_total  = dim_totals["weight"]
+                        output_total  = dim_totals["output"]
+
+                        # parallel unroll all RFiles
+                        for RFile in self.RFiles:
+                            # overwrite loop counters with RFile assigned loop counter
+                            RFile_curr_loop_counters = copy.deepcopy(self.loop_counters)
+                            RFile_curr_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
+
+                            if prev_loop_counters is not None:
+                                RFile_prev_loop_counters = copy.deepcopy(prev_loop_counters)
+                                RFile_prev_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
+                            else:
+                                RFile_prev_loop_counters = prev_loop_counters
+
+                            channel_idx = RFile_curr_loop_counters[hierarchy_index-1]["channel"]
+                            filter_idx  = RFile_curr_loop_counters[hierarchy_index-1]["filter"]
+                            weight_idx  = RFile_curr_loop_counters[hierarchy_index-1]["weight"]
+                            output_idx  = RFile_curr_loop_counters[hierarchy_index-1]["output"]
+
+                            # prefetch weight and output memories
+                            self.memory_prefetch_wrapper(RFile.weight_memory, 
+                                                         hierarchy_index-1,
+                                                         RFile_curr_loop_counters,
+                                                         RFile_prev_loop_counters,
+                                                         curr_loop_order_lst)
+
+                            self.memory_prefetch_wrapper(RFile.output_memory, 
+                                                         hierarchy_index-1,
+                                                         RFile_curr_loop_counters,
+                                                         RFile_prev_loop_counters,
+                                                         curr_loop_order_lst)
+
+                            # calculate input delta
+                            RFile.input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
+                            input_delta = RFile.input_curr_block_start - RFile.input_prev_block_start
+
+                            # check if this is the first time entering this loop block
+                            if start:
+                                # preform a fresh prefetch
+                                is_fresh_prefetch = RFile.input_memory.prefetch(None, 
+                                                                                RFile_curr_loop_counters[hierarchy_index-1],
+                                                                                curr_loop_order_lst)
+
+                            else:
+                                # perform a delta prefetch
+                                is_fresh_prefetch = RFile.input_memory.prefetch(input_delta, 
+                                                                                RFile_curr_loop_counters[hierarchy_index-1],
+                                                                                curr_loop_order_lst)
+
+                            self.L0_compute(hierarchy_index+1, debug, RFile_curr_loop_counters,
+                                            RFile.input_memory, RFile.weight_memory, RFile.output_memory)
+
+                            RFile.input_prev_block_start = RFile.input_curr_block_start
+
+                    start = False
+                    prev_loop_counters = copy.deepcopy(self.loop_counters)
+
+        # parallel unroll all RFiles
+        for RFile in self.RFiles:
+            # perform write backs 
+            if "input" in self.write_backs:
+                RFile.input_memory.write_back_op_space()
+            if "weight" in self.write_backs:
+                RFile.weight_memory.write_back_op_space()
+            if "output" in self.write_backs:
+                RFile.output_memory.write_back_op_space()
+          
+        return
+
+
+
+    def L0_compute(self, hierarchy_index, debug, loop_counters,
+                   input_memory, weight_memory, output_memory):
+
+        curr_loop_order_lst = self.loop_order_lst[hierarchy_index - 1]
+
+        dim_0 = curr_loop_order_lst[0]
+        dim_1 = curr_loop_order_lst[1]
+        dim_2 = curr_loop_order_lst[2]
+        dim_3 = curr_loop_order_lst[3]
+
+        dim_idxs = {"channel": None, "filter": None, "weight": None, "output": None}
+
+        for idx_0 in range(self.tilings_dict[dim_0][hierarchy_index - 1]):
+            loop_counters[hierarchy_index-1][dim_0] = idx_0
+            dim_idxs[dim_0] = idx_0
+
+            for idx_1 in range(self.tilings_dict[dim_1][hierarchy_index - 1]):
+                loop_counters[hierarchy_index-1][dim_1] = idx_1
+                dim_idxs[dim_1] = idx_1
+
+                for idx_2 in range(self.tilings_dict[dim_2][hierarchy_index - 1]):
+                    loop_counters[hierarchy_index-1][dim_2] = idx_2
+                    dim_idxs[dim_2] = idx_2
+
+                    for idx_3 in range(self.tilings_dict[dim_3][hierarchy_index - 1]):
+                        loop_counters[hierarchy_index-1][dim_3] = idx_3
+                        dim_idxs[dim_3] = idx_3
+
+                        channel_idx = dim_idxs["channel"]
+                        filter_idx  = dim_idxs["filter"]
+                        weight_idx  = dim_idxs["weight"]
+                        output_idx  = dim_idxs["output"]
+
+                        # get input data value
+                        input_request = {"channel": channel_idx, "input": weight_idx + output_idx}
+                        input_val = input_memory.load(input_request)
+                      
+                        # get weight data value
+                        weight_request = {"channel": channel_idx, "filter": filter_idx, "weight": weight_idx}
+                        weight_val = weight_memory.load(weight_request)
+
+                        # get output data value
+                        output_request = {"filter": filter_idx, "output": output_idx}
+                        output_val = output_memory.load(output_request)
+
+                        # barrier synchronization
+                        input_memory.barrier_sync()
+                        weight_memory.barrier_sync()
+                        output_memory.barrier_sync()
+                      
+                        # if simulating in debug mode, check that the input values and 
+                        # weight values match with their global indices
+                        # if debug:
+
+                        #     global_channel_idx = 0
+                        #     global_filter_idx = 0
+                        #     global_weight_idx = 0
+                        #     global_output_idx = 0
+
+                        #     num_channels = self.base_dim_map_dict["channel"]
+                        #     num_filters = self.base_dim_map_dict["filter"]
+                        #     num_weights = self.base_dim_map_dict["weight"]
+                        #     num_outputs = self.base_dim_map_dict["output"]
+                        #     num_inputs = num_weights + num_outputs - 1
+
+                        #     for i, loop_counter in enumerate(loop_counters):
+
+                        #         channel_total = 1
+                        #         for tiling in self.tilings_dict["channel"][i+1:]:
+                        #             channel_total *= tiling
+                        #         global_channel_idx += loop_counter["channel"]*channel_total
+
+                        #         filter_total = 1
+                        #         for tiling in self.tilings_dict["filter"][i+1:]:
+                        #             filter_total *= tiling
+                        #         global_filter_idx += loop_counter["filter"]*filter_total
+
+                        #         weight_total = 1
+                        #         for tiling in self.tilings_dict["weight"][i+1:]:
+                        #             weight_total *= tiling
+                        #         global_weight_idx += loop_counter["weight"]*weight_total
+
+                        #         output_total = 1
+                        #         for tiling in self.tilings_dict["output"][i+1:]:
+                        #             output_total *= tiling
+                        #         global_output_idx += loop_counter["output"]*output_total
+
+                        #     global_weight_val = global_channel_idx * num_filters * num_weights + \
+                        #                         global_filter_idx * num_weights + \
+                        #                         global_weight_idx
+
+                        #     global_output_val = global_filter_idx * num_outputs + \
+                        #                         global_output_idx
+
+                        #     global_input_val  = global_channel_idx * num_inputs + \
+                        #                         global_weight_idx + global_output_idx
+
+                        #     if (input_val != global_input_val):
+                        #         print("INPUT VALUE MISMATCH")
+                        #         print(loop_counters)
+                        #         print("Expected: ", global_input_val)
+                        #         print("Returned: ", input_val)
+                        #         input_memory.print()
+                        #         assert False
+                        #     if (weight_val != global_weight_val):
+                        #         print("WEIGHT VALUE MISMATCH")
+                        #         print(loop_counters)
+                        #         print("Expected: ", global_weight_val)
+                        #         print("Returned: ", weight_val)
+                        #         weight_memory.print()
+                        #         assert False
+                          
+                        # compute new output data value and store it back into output memory
+                        output_val += input_val * weight_val
+                        output_memory.store(output_request, output_val)
+
+                        # barrier synchronization
+                        input_memory.barrier_sync()
+                        weight_memory.barrier_sync()
+                        output_memory.barrier_sync()
+
+        return
+
+
 
     """
     "run" performs the entire simulation of the multi-channel/multi-filter convolution
@@ -413,366 +913,16 @@ class Controller:
     """
     def run(self, debug=False):
         
-        def recursive_simulate(input_memory_hierarchy, 
-                               weight_memory_hierarchy, 
-                               output_memory_hierarchy,
-                               hierarchy_index, 
-                               hierarchy_levels, 
-                               loop_order_lst, 
-                               tilings_dict,
-                               loop_counters,
-                               prev_loop_counters,
-                               write_backs, debug):
-            
-            curr_loop_order_lst = self.loop_order_lst[hierarchy_index - 1]
-            
-            # base case
-            if hierarchy_index == hierarchy_levels:
-                
-                # get the memories at the current level
-                input_memory = input_memory_hierarchy[hierarchy_index-1]
-                weight_memory = weight_memory_hierarchy[hierarchy_index-1]
-                output_memory = output_memory_hierarchy[hierarchy_index-1]
+        """
+        ############################
+        """
 
-                dim_0 = curr_loop_order_lst[0]
-                dim_1 = curr_loop_order_lst[1]
-                dim_2 = curr_loop_order_lst[2]
-                dim_3 = curr_loop_order_lst[3]
-
-                dim_idxs = {"channel": None, "filter": None, "weight": None, "output": None}
-
-                for idx_0 in range(tilings_dict[dim_0][hierarchy_index - 1]):
-                    loop_counters[hierarchy_index-1][dim_0] = idx_0
-                    dim_idxs[dim_0] = idx_0
-
-                    for idx_1 in range(tilings_dict[dim_1][hierarchy_index - 1]):
-                        loop_counters[hierarchy_index-1][dim_1] = idx_1
-                        dim_idxs[dim_1] = idx_1
-
-                        for idx_2 in range(tilings_dict[dim_2][hierarchy_index - 1]):
-                            loop_counters[hierarchy_index-1][dim_2] = idx_2
-                            dim_idxs[dim_2] = idx_2
-
-                            for idx_3 in range(tilings_dict[dim_3][hierarchy_index - 1]):
-                                loop_counters[hierarchy_index-1][dim_3] = idx_3
-                                dim_idxs[dim_3] = idx_3
-
-                                channel_idx = dim_idxs["channel"]
-                                filter_idx  = dim_idxs["filter"]
-                                weight_idx  = dim_idxs["weight"]
-                                output_idx  = dim_idxs["output"]
-
-                                # get input data value
-                                input_request = {"channel": channel_idx, "input": weight_idx + output_idx}
-                                input_val = input_memory.load(input_request)
-                                
-                                # get weight data value
-                                weight_request = {"channel": channel_idx, "filter": filter_idx, "weight": weight_idx}
-                                weight_val = weight_memory.load(weight_request)
-
-                                # get output data value
-                                output_request = {"filter": filter_idx, "output": output_idx}
-                                output_val = output_memory.load(output_request)
-
-                                # barrier synchronization
-                                input_memory.barrier_sync()
-                                weight_memory.barrier_sync()
-                                output_memory.barrier_sync()
-                                
-                                # if simulating in debug mode, check that the input value and 
-                                # weight values match with their global indixes
-                                if debug:
-
-                                    global_channel_idx = 0
-                                    global_filter_idx = 0
-                                    global_weight_idx = 0
-                                    global_output_idx = 0
-
-                                    num_channels = self.base_dim_map_dict["channel"]
-                                    num_filters = self.base_dim_map_dict["filter"]
-                                    num_weights = self.base_dim_map_dict["weight"]
-                                    num_outputs = self.base_dim_map_dict["output"]
-                                    num_inputs = num_weights + num_outputs - 1
-
-                                    for i, loop_counter in enumerate(loop_counters):
-
-                                        channel_total = 1
-                                        for tiling in tilings_dict["channel"][i+1:]:
-                                            channel_total *= tiling
-                                        global_channel_idx += loop_counter["channel"]*channel_total
-
-                                        filter_total = 1
-                                        for tiling in tilings_dict["filter"][i+1:]:
-                                            filter_total *= tiling
-                                        global_filter_idx += loop_counter["filter"]*filter_total
-
-                                        weight_total = 1
-                                        for tiling in tilings_dict["weight"][i+1:]:
-                                            weight_total *= tiling
-                                        global_weight_idx += loop_counter["weight"]*weight_total
-
-                                        output_total = 1
-                                        for tiling in tilings_dict["output"][i+1:]:
-                                            output_total *= tiling
-                                        global_output_idx += loop_counter["output"]*output_total
-
-                                    global_weight_val = global_channel_idx * num_filters * num_weights + \
-                                                        global_filter_idx * num_weights + \
-                                                        global_weight_idx
-
-                                    global_output_val = global_filter_idx * num_outputs + \
-                                                        global_output_idx
-
-                                    global_input_val  = global_channel_idx * num_inputs + \
-                                                        global_weight_idx + global_output_idx
-
-                                    if (input_val != global_input_val):
-                                        print("INPUT VALUE MISMATCH")
-                                        print(loop_counters)
-                                        print("Expected: ", global_input_val)
-                                        print("Returned: ", input_val)
-                                        input_memory.print()
-                                        assert False
-                                    if (weight_val != global_weight_val):
-                                        print("WEIGHT VALUE MISMATCH")
-                                        print(loop_counters)
-                                        print("Expected: ", global_weight_val)
-                                        print("Returned: ", weight_val)
-                                        weight_memory.print()
-                                        assert False
-                                    
-                                # compute new output data value and store it back into output memory
-                                output_val += input_val * weight_val
-                                # print(output_val)
-                                output_memory.store(output_request, output_val)
-
-                                # barrier synchronization
-                                input_memory.barrier_sync()
-                                weight_memory.barrier_sync()
-                                output_memory.barrier_sync()
-                            
-                return
-            
-            # recursive case
-            else:
-                
-                # get the memories at the current level
-                input_memory = input_memory_hierarchy[hierarchy_index]
-                weight_memory = weight_memory_hierarchy[hierarchy_index]
-                output_memory = output_memory_hierarchy[hierarchy_index]
-                
-                input_prev_block_start = 0
-                input_curr_block_start = 0
-                input_delta = 0
-                old_prev_loop_counters = None
-
-                dim_0 = curr_loop_order_lst[0]
-                dim_1 = curr_loop_order_lst[1]
-                dim_2 = curr_loop_order_lst[2]
-                dim_3 = curr_loop_order_lst[3]
-
-                dim_idxs   = {"channel": None, "filter": None, "weight": None, "output": None}
-                dim_totals = {"channel": None, "filter": None, "weight": None, "output": None}
-
-                input_loop_counters = {"channel": 0, "filter": 0, "weight": 0, "output": 0}
-                weight_loop_counters = {"channel": 0, "filter": 0, "weight": 0, "output": 0}
-                output_loop_counters = {"channel": 0, "filter": 0, "weight": 0, "output": 0}
-
-                start = False
-                first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst)
-                weight_prefetch_level = self.get_weight_prefetch_level(curr_loop_order_lst)
-                output_prefetch_level = self.get_output_prefetch_level(curr_loop_order_lst)
-
-                curr_level = 0
-                if curr_level == first_prefetch_level: start = True
-                
-                loop_counters[hierarchy_index-1][dim_0] = 0
-                loop_counters[hierarchy_index-1][dim_1] = 0
-                loop_counters[hierarchy_index-1][dim_2] = 0
-                loop_counters[hierarchy_index-1][dim_3] = 0
-
-                for idx_0 in range(tilings_dict[dim_0][hierarchy_index - 1]):
-                    dim_idxs[dim_0] = idx_0
-                    dim_totals[dim_0] = 1
-                    for tile_0 in tilings_dict[dim_0][hierarchy_index:]:
-                        dim_totals[dim_0] *= tile_0
-                    loop_counters[hierarchy_index-1][dim_0] = idx_0
-
-                    if weight_prefetch_level == 0:
-                        # prefetch data for weight memory
-                        weight_memory.prefetch(None, 
-                                               loop_counters[hierarchy_index-1], 
-                                               weight_loop_counters, 
-                                               curr_loop_order_lst)
-                        weight_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                    if output_prefetch_level == 0:
-                        # prefetch data for output memory
-                        output_memory.prefetch(None, 
-                                               loop_counters[hierarchy_index-1], 
-                                               output_loop_counters, 
-                                               curr_loop_order_lst)
-                        output_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                    curr_level = 1
-                    if curr_level == first_prefetch_level: start = True
-                    
-                    loop_counters[hierarchy_index-1][dim_1] = 0
-                    loop_counters[hierarchy_index-1][dim_2] = 0
-                    loop_counters[hierarchy_index-1][dim_3] = 0
-
-                    for idx_1 in range(tilings_dict[dim_1][hierarchy_index - 1]):
-                        dim_idxs[dim_1] = idx_1
-                        dim_totals[dim_1] = 1
-                        for tile_1 in tilings_dict[dim_1][hierarchy_index:]:
-                            dim_totals[dim_1] *= tile_1
-                        loop_counters[hierarchy_index-1][dim_1] = idx_1
-
-                        if weight_prefetch_level == 1:
-                            # prefetch data for weight memory
-                            weight_memory.prefetch(None, 
-                                                   loop_counters[hierarchy_index-1], 
-                                                   weight_loop_counters, 
-                                                   curr_loop_order_lst)
-                            weight_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                        if output_prefetch_level == 1:
-                            # prefetch data for output memory
-                            output_memory.prefetch(None, 
-                                                   loop_counters[hierarchy_index-1], 
-                                                   output_loop_counters, 
-                                                   curr_loop_order_lst)
-                            output_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-                        
-                        curr_level = 2
-                        if curr_level == first_prefetch_level: start = True
-
-                        loop_counters[hierarchy_index-1][dim_2] = 0
-                        loop_counters[hierarchy_index-1][dim_3] = 0
-                        
-                        for idx_2 in range(tilings_dict[dim_2][hierarchy_index - 1]):
-                            dim_idxs[dim_2] = idx_2
-                            dim_totals[dim_2] = 1
-                            for tile_2 in tilings_dict[dim_2][hierarchy_index:]:
-                                dim_totals[dim_2] *= tile_2
-                            loop_counters[hierarchy_index-1][dim_2] = idx_2
-
-                            if weight_prefetch_level == 2:
-                                # prefetch data for weight memory
-                                weight_memory.prefetch(None, 
-                                                       loop_counters[hierarchy_index-1], 
-                                                       weight_loop_counters, 
-                                                       curr_loop_order_lst)
-                                weight_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                            if output_prefetch_level == 2:
-                                # prefetch data for output memory
-                                output_memory.prefetch(None, 
-                                                       loop_counters[hierarchy_index-1], 
-                                                       output_loop_counters, 
-                                                       curr_loop_order_lst)
-                                output_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                            curr_level = 3
-                            if curr_level == first_prefetch_level: start = True
-
-                            loop_counters[hierarchy_index-1][dim_3] = 0
-
-                            for idx_3 in range(tilings_dict[dim_3][hierarchy_index - 1]):
-                                dim_idxs[dim_3] = idx_3
-                                dim_totals[dim_3] = 1
-                                for tile_3 in tilings_dict[dim_3][hierarchy_index:]:
-                                    dim_totals[dim_3] *= tile_3
-                                loop_counters[hierarchy_index-1][dim_3] = idx_3
-
-                                if weight_prefetch_level == 3:
-                                    # prefetch data for weight memory
-                                    weight_memory.prefetch(None, 
-                                                           loop_counters[hierarchy_index-1], 
-                                                           weight_loop_counters, 
-                                                           curr_loop_order_lst)
-                                    weight_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                                if output_prefetch_level == 3:
-                                    # prefetch data for output memory
-                                    output_memory.prefetch(None, 
-                                                           loop_counters[hierarchy_index-1], 
-                                                           output_loop_counters, 
-                                                           curr_loop_order_lst)
-                                    output_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                                channel_idx = dim_idxs["channel"]
-                                filter_idx  = dim_idxs["filter"]
-                                weight_idx  = dim_idxs["weight"]
-                                output_idx  = dim_idxs["output"]
-                                
-                                channel_total = dim_totals["channel"]
-                                filter_total  = dim_totals["filter"]
-                                weight_total  = dim_totals["weight"]
-                                output_total  = dim_totals["output"]
-
-                                # calculate input delta
-                                input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
-                                input_delta = input_curr_block_start - input_prev_block_start
-
-                                # check if this is the first time entering this loop block
-                                if start:
-                                    # preform a fresh prefetch
-                                    is_fresh_prefetch = input_memory.prefetch(None, 
-                                                          loop_counters[hierarchy_index-1], 
-                                                          input_loop_counters, 
-                                                          curr_loop_order_lst)
-    
-                                else:
-                                    # perform a delta prefetch
-                                    is_fresh_prefetch = input_memory.prefetch(input_delta, 
-                                                          loop_counters[hierarchy_index-1], 
-                                                          input_loop_counters, 
-                                                          curr_loop_order_lst)
-
-                                if is_fresh_prefetch: input_loop_counters = copy.deepcopy(loop_counters[hierarchy_index-1])
-
-                                # simulate next level 
-                                recursive_simulate(input_memory_hierarchy, 
-                                                   weight_memory_hierarchy, 
-                                                   output_memory_hierarchy,
-                                                   hierarchy_index+1, 
-                                                   hierarchy_levels, 
-                                                   loop_order_lst[1:], 
-                                                   tilings_dict,
-                                                   loop_counters,
-                                                   prev_loop_counters,
-                                                   write_backs,
-                                                   debug)
-
-                                input_prev_block_start = input_curr_block_start
-                                old_prev_loop_counters = copy.deepcopy(prev_loop_counters)
-                                prev_loop_counters = copy.deepcopy(loop_counters)
-                                start = False
-                
-                # perform write backs 
-                if "input" in write_backs:
-                    input_memory.write_back_op_space(input_loop_counters)
-                if "weight" in write_backs:
-                    weight_memory.write_back_op_space(weight_loop_counters)
-                if "output" in write_backs:
-                    output_memory.write_back_op_space(output_loop_counters)
-                    
-                return
-            
         # start the simulation
         hierarchy_index = 1
-        hierarchy_levels = len(self.input_memory_hierarchy)
-        recursive_simulate(self.input_memory_hierarchy, 
-                           self.weight_memory_hierarchy,
-                           self.output_memory_hierarchy,
-                           hierarchy_index,
-                           hierarchy_levels,
-                           self.loop_order_lst,
-                           self.tilings_dict,
-                           self.loop_counters, 
-                           self.prev_loop_counters,
-                           self.write_backs, debug)
+        if (self.num_levels <= 2) and (self.parallel_for_dims is not None):
+            self.L0_parallel_simulate(hierarchy_index, debug)
+        else:
+            self.Ln_recursive_simulate(hierarchy_index, debug)
 
         input_memory  = self.input_memory_hierarchy[0]
         weight_memory = self.weight_memory_hierarchy[0]

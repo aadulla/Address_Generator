@@ -61,6 +61,9 @@ class Queue:
     """
     def is_empty(self):
         return self.curr_size == 0
+
+    def __len__(self):
+        return self.curr_size
     
     """
     "__repr__" prints the data in the buffer
