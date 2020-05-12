@@ -833,65 +833,65 @@ class Controller:
                       
                         # if simulating in debug mode, check that the input values and 
                         # weight values match with their global indices
-                        # if debug:
+                        if debug:
 
-                        #     global_channel_idx = 0
-                        #     global_filter_idx = 0
-                        #     global_weight_idx = 0
-                        #     global_output_idx = 0
+                            global_channel_idx = 0
+                            global_filter_idx = 0
+                            global_weight_idx = 0
+                            global_output_idx = 0
 
-                        #     num_channels = self.base_dim_map_dict["channel"]
-                        #     num_filters = self.base_dim_map_dict["filter"]
-                        #     num_weights = self.base_dim_map_dict["weight"]
-                        #     num_outputs = self.base_dim_map_dict["output"]
-                        #     num_inputs = num_weights + num_outputs - 1
+                            num_channels = self.base_dim_map_dict["channel"]
+                            num_filters = self.base_dim_map_dict["filter"]
+                            num_weights = self.base_dim_map_dict["weight"]
+                            num_outputs = self.base_dim_map_dict["output"]
+                            num_inputs = num_weights + num_outputs - 1
 
-                        #     for i, loop_counter in enumerate(loop_counters):
+                            for i, loop_counter in enumerate(loop_counters):
 
-                        #         channel_total = 1
-                        #         for tiling in self.tilings_dict["channel"][i+1:]:
-                        #             channel_total *= tiling
-                        #         global_channel_idx += loop_counter["channel"]*channel_total
+                                channel_total = 1
+                                for tiling in self.tilings_dict["channel"][i+1:]:
+                                    channel_total *= tiling
+                                global_channel_idx += loop_counter["channel"]*channel_total
 
-                        #         filter_total = 1
-                        #         for tiling in self.tilings_dict["filter"][i+1:]:
-                        #             filter_total *= tiling
-                        #         global_filter_idx += loop_counter["filter"]*filter_total
+                                filter_total = 1
+                                for tiling in self.tilings_dict["filter"][i+1:]:
+                                    filter_total *= tiling
+                                global_filter_idx += loop_counter["filter"]*filter_total
 
-                        #         weight_total = 1
-                        #         for tiling in self.tilings_dict["weight"][i+1:]:
-                        #             weight_total *= tiling
-                        #         global_weight_idx += loop_counter["weight"]*weight_total
+                                weight_total = 1
+                                for tiling in self.tilings_dict["weight"][i+1:]:
+                                    weight_total *= tiling
+                                global_weight_idx += loop_counter["weight"]*weight_total
 
-                        #         output_total = 1
-                        #         for tiling in self.tilings_dict["output"][i+1:]:
-                        #             output_total *= tiling
-                        #         global_output_idx += loop_counter["output"]*output_total
+                                output_total = 1
+                                for tiling in self.tilings_dict["output"][i+1:]:
+                                    output_total *= tiling
+                                global_output_idx += loop_counter["output"]*output_total
 
-                        #     global_weight_val = global_channel_idx * num_filters * num_weights + \
-                        #                         global_filter_idx * num_weights + \
-                        #                         global_weight_idx
+                            global_weight_val = global_channel_idx * num_filters * num_weights + \
+                                                global_filter_idx * num_weights + \
+                                                global_weight_idx
 
-                        #     global_output_val = global_filter_idx * num_outputs + \
-                        #                         global_output_idx
+                            global_output_val = global_filter_idx * num_outputs + \
+                                                global_output_idx
 
-                        #     global_input_val  = global_channel_idx * num_inputs + \
-                        #                         global_weight_idx + global_output_idx
+                            global_input_val  = global_channel_idx * num_inputs + \
+                                                global_weight_idx + global_output_idx
 
-                        #     if (input_val != global_input_val):
-                        #         print("INPUT VALUE MISMATCH")
-                        #         print(loop_counters)
-                        #         print("Expected: ", global_input_val)
-                        #         print("Returned: ", input_val)
-                        #         input_memory.print()
-                        #         assert False
-                        #     if (weight_val != global_weight_val):
-                        #         print("WEIGHT VALUE MISMATCH")
-                        #         print(loop_counters)
-                        #         print("Expected: ", global_weight_val)
-                        #         print("Returned: ", weight_val)
-                        #         weight_memory.print()
-                        #         assert False
+                            if (input_val != global_input_val):
+                                print("INPUT VALUE MISMATCH")
+                                print(loop_counters)
+                                print("Expected: ", global_input_val)
+                                print("Returned: ", input_val)
+                                input_memory.print()
+                                assert False
+                            if (weight_val != global_weight_val):
+                                print("WEIGHT VALUE MISMATCH")
+                                print(loop_counters)
+                                print("Expected: ", global_weight_val)
+                                print("Returned: ", weight_val)
+                                weight_memory.print()
+                                assert False
                           
                         # compute new output data value and store it back into output memory
                         output_val += input_val * weight_val
