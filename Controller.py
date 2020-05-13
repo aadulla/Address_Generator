@@ -251,14 +251,14 @@ class Controller:
                  input_memory_sizes, weight_memory_sizes, output_memory_sizes,
                  input_data, weight_data, output_data,
                  loop_tiling_lst, costs, write_backs, parallel_for_dims):
-
-        self.tmp = loop_tiling_lst
         
         self.write_backs = write_backs
         self.parallel_for_dims = parallel_for_dims
         # add 1 to account for not including base memory size
         self.num_levels = len(input_memory_sizes) + 1
         
+        self.loop_tiling_lst = loop_tiling_lst
+
         self.loop_order_lst  = []
         self.filter_tilings  = []
         self.channel_tilings = []
@@ -271,7 +271,7 @@ class Controller:
                              "output" : self.output_tilings}
         
         # create the tilings_dict and loop_order_lst
-        for loop_tile in loop_tiling_lst:
+        for loop_tile in self.loop_tiling_lst:
             self.loop_order_lst.append([])
             for loop_space in loop_tile:
                 loop_key, loop_val = list(loop_space.items())[0]
@@ -1092,21 +1092,346 @@ class Controller:
         self.output_memory_hierarchy.print_stats()
         print()
 
-        for tile in self.tmp:
+        for tile in self.loop_tiling_lst:
             print(tile)
         print()
 
-        print("Input Memory Iteration Stats")
-        for iteration in self.memory_stats["input"]:
-            print(iteration)
+        # print("Input Memory Iteration Stats")
+        # for iteration in self.memory_stats["input"]:
+        #     print(iteration)
+        # print()
+
+        # print("Weight Memory Iteration Stats")
+        # for iteration in self.memory_stats["weight"]:
+        #     print(iteration)
+        # print()
+
+        # print("Output Memory Iteration Stats")
+        # for iteration in self.memory_stats["output"]:
+        #     print(iteration)
+        # print()
+
+    def calc_read_write_counts_sequential(self):
+        """
+        Analytical Formula for Read/Write Counts Sequential
+        #########################################################################################################
+
+        WeightMemory and OutputMemory have full prefetches everytime so no need to worry about delta prefetches
+
+        To determine the number of read counts at level n by level n-1:
+            1) find full prefetch size of memory at level n-1
+            2) examine loop tiling between level n and level n-1 memory
+                a) find lowest dim that is in the memory's dependency set
+                b) find product from lowest dim to second highest dim of topmost loop tile
+            3) multiply product of dims with full prefetch size
+        The result is the number of read counts for the first iteration of the entire convolution
+        To find total read counts, multiply by range of highest dim
+
+
+        InputMemory have both full and delta prefetches, so we need to analytically determine when a certain 
+        prefetch scheme is used. When the lowest dim of an InputMemory is "input", then there will always be
+        a delta prefetch when changing the val of a single dim ("weight" or "output") at a time. When changing
+        the val of the next dimension, there is the potential for crossover (delta prefetch) and if not, we do 
+        a full prefetch. When the lowest dim on an InputMemory is "channel", then there will never be a delta
+        prefetch and so will always have full prefetches.
+
+        To determine the number of read counts at level n by level n-1: 
+            1) find full prefetch size of memory at level n-1
+                a) determine what the lowest dim of memory at level n-1 is
+                b) determine number of channels and spatial size of input space
+            2) exmaine loop tiling between level n and n-1 memory
+            3) if lowest dim == "channel"
+                a) find "channel" dim and take product of all dims to second highest dim of topmost loop tile
+                b) multiply product of dims with full prefetch size
+            4) if lowest dim == "input"
+                a) we know that the lowest dim in the loop tiling is either "weight" or "output"
+                b) determine the associated spatial size of the lowest dim (i.e. take product of range of all same dims in lower loop tilings)
+                    i) this is the delta size for each step in the lowest dim
+                c) # of delta prefetches = lowest dim range - 1 (why -1: because first prefetch is always full prefetch)
+                d) Case 1: if second lowest dim is either "weight" or "output"
+                    i) determine the delta when crossing over from lowest dim to second lowest dim
+                        a) delta = (second lowest dim spatial size) - (lowest dim spatial size * (lowest dim range - 1))
+                        b) if delta is less than input spatial size of level n-1 memory, then can do delta prefetch
+                            i) read counts:
+                               (
+                                full prefetch + 
+                                (channel spatial size) * (lowest dim range - 1) * (lowest dim spatial size) * (second lowest dim range - 1) +
+                                (channel spatial size) * ((second lowest dim spatial size) - (lowest dim spatial size * (lowest dim range - 1))) * (second lowest dim range - 1)
+                               ) * 
+                               product of all dimensions from second dim in loop tiling to second highest dim
+                        c) else, need to do full prefetch
+                            i) read counts:
+                               (
+                                full prefetch + 
+                                (channel spatial size * (lowest dim range - 1) * lowest dim spatial size)
+                               ) * 
+                               product of all dimensions from third (second lowest) dim in loop tiling to second highest dim
+                e) Case 2: if second lowest dim is "channel": need to do full prefetch when changing val of channel dim
+                    i) read counts:
+                       (
+                        full prefetch + 
+                        (channel spatial size) * (lowest dim range - 1) * (lowest dim spatial size)
+                       ) * 
+                       product of all dimensions from third (second lowest) dim in loop tiling to second highest dim
+
+        If we are using write backs, then:
+        # of read counts to level n from level n+/-1 = # of write counts to level n-1 from level n+/-1
+
+        Total read counts at level n = # of read counts from level n-1 (prefetch) + # of read counts from level n+1 (writeback)
+        """
+
+        def calc_weight_read_count(level, loop_tiling_lst):
+            # lowest memory is always written to
+            if level == len(loop_tiling_lst) - 1: return 0
+
+            # determine full prefetch size of level-1 memory
+            channel_op_space_size, filter_op_space_size, weight_op_space_size = 1, 1, 1
+            for loop_tile in loop_tiling_lst[level+1:]:
+                for dim_dict in loop_tile:
+                    for dim_name, dim_range in dim_dict.items():
+                        if dim_name == "channel": channel_op_space_size *= dim_range
+                        elif dim_name == "filter": filter_op_space_size *= dim_range
+                        elif dim_name == "weight": weight_op_space_size *= dim_range
+            full_prefetch_size = channel_op_space_size * filter_op_space_size * weight_op_space_size
+
+            my_loop_tile = loop_tiling_lst[level]
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:level]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            # determine the lowest dim
+            lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "channel": 
+                    lowest_dim = "channel"
+                    break
+                elif dim_name == "filter": 
+                    lowest_dim = "filter"
+                    break
+                elif dim_name == "weight": 
+                    lowest_dim = "weight"
+                    break
+
+            for dim_dict in my_loop_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                upper_dim_product *= dim_range
+                if dim_name == lowest_dim: break
+
+            read_count = upper_dim_product * full_prefetch_size
+            return read_count
+
+
+        def calc_output_read_count(level, loop_tiling_lst):
+            # lowest memory is always written to
+            if level == len(loop_tiling_lst) - 1: return 0
+
+            # determine full prefetch size of level-1 memory
+            filter_op_space_size, output_op_space_size = 1, 1
+            for loop_tile in loop_tiling_lst[level+1:]:
+                for dim_dict in loop_tile:
+                    for dim_name, dim_range in dim_dict.items():
+                        if dim_name == "filter": filter_op_space_size *= dim_range
+                        elif dim_name == "output": output_op_space_size *= dim_range
+            full_prefetch_size = filter_op_space_size * output_op_space_size
+
+            my_loop_tile = loop_tiling_lst[level]
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:level]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            # determine the lowest dim
+            lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "filter": 
+                    lowest_dim = "filter"
+                    break
+                elif dim_name == "output": 
+                    lowest_dim = "output"
+                    break
+
+            for dim_dict in my_loop_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                upper_dim_product *= dim_range
+                if dim_name == lowest_dim: break
+
+            read_count = upper_dim_product * full_prefetch_size
+            return read_count
+
+
+        def calc_input_read_count(level, loop_tiling_lst):
+            # lowest memory is always written to
+            if level == len(loop_tiling_lst) - 1: return 0
+
+            # determine full prefetch size of level-1 memory
+            channel_op_space_size, weight_op_space_size, output_op_space_size = 1, 1, 1
+            for loop_tile in loop_tiling_lst[level+1:]:
+                for dim_dict in loop_tile:
+                    for dim_name, dim_range in dim_dict.items():
+                        if dim_name == "channel": channel_op_space_size *= dim_range
+                        elif dim_name == "weight": weight_op_space_size *= dim_range
+                        elif dim_name == "output": output_op_space_size *= dim_range
+            input_op_space_size = weight_op_space_size + output_op_space_size - 1
+            full_prefetch_size = channel_op_space_size * input_op_space_size
+
+            my_loop_tile = loop_tiling_lst[level]
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:level]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            # determine the lowest dim
+            lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "channel": 
+                    lowest_dim = "channel"
+                    break
+                elif dim_name == "weight" or dim_name == "output": 
+                    lowest_dim = "input"
+                    break
+
+            # Case 1: lowest dim is channel
+            if lowest_dim == "channel":
+
+                for dim_dict in my_loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+                    if dim_name == "channel": break
+
+                read_count = upper_dim_product * full_prefetch_size
+                return read_count
+
+            # Case 2: lowest dim is input
+            else:
+                is_consecutive_input = False
+                lowest_input_dim_name = None
+                lowest_input_dim_range = None
+                second_lowest_dim_name = None
+                second_lowest_input_dim_range = None
+
+                # determine if output and weight dims are consecutive
+                for i, dim_dict in enumerate(reversed(my_loop_tile)):
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    if dim_name == "weight" or dim_name == "output":
+                        lowest_input_dim = dim_name
+                        lowest_input_dim_range = dim_range
+
+                        # get immediately prev dim
+                        prev_dim_idx = len(my_loop_tile)-i-2
+                        prev_dim_dict = my_loop_tile[prev_dim_idx]
+                        prev_dim_name, prev_dim_range = list(prev_dim_dict.items())[0]
+                        second_lowest_dim_name = prev_dim_name
+                        second_lowest_input_dim_range = prev_dim_range
+                        if prev_dim_name == "weight" or prev_dim_name == "output":
+                            is_consecutive_input = True
+                            break
+                        else:
+                            is_consecutive_input = False
+                            break 
+
+                # determine delta prefetches for lowest input dim 
+                if lowest_input_dim == "weight":
+                    delta_prefetch_size = weight_op_space_size * channel_op_space_size * (lowest_input_dim_range-1) * (second_lowest_input_dim_range)
+
+                    # if is consecutive input, then need to determine dim crossover delta
+                    if is_consecutive_input:
+                        crossover_delta = output_op_space_size - (weight_op_space_size * (lowest_input_dim_range-1))
+
+                    # channel was prev dim, so force a full prefetch
+                    else:
+                        crossover_delta = input_op_space_size
+                else:
+                    delta_prefetch_size = output_op_space_size * channel_op_space_size * (lowest_input_dim_range-1) * (second_lowest_input_dim_range)
+
+                    # if is consecutive input, then need to determine dim crossover delta
+                    if is_consecutive_input:
+                        crossover_delta = weight_op_space_size - (output_op_space_size * (lowest_input_dim_range-1))
+
+                    # channel was prev dim, so force a full prefetch
+                    else:
+                        crossover_delta = input_op_space_size
+
+                # Case 2a: valid crossover delta
+                if abs(crossover_delta) < input_op_space_size:
+                    crossover_delta_prefetch_size = abs(crossover_delta) * channel_op_space_size * (second_lowest_input_dim_range-1)
+
+                # Case 2b: no valid crossover delta
+                else: 
+                    crossover_delta_prefetch_size = full_prefetch_size * (second_lowest_input_dim_range-1)
+
+                total_prefetch_size = full_prefetch_size + delta_prefetch_size + crossover_delta_prefetch_size
+
+                # get product of all higher dims
+                for dim_dict in my_loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    if dim_name == second_lowest_dim_name: break
+                    upper_dim_product *= dim_range
+
+                read_count = upper_dim_product * total_prefetch_size
+                return read_count
+
+
+        # create read/write counts dict
+        input_read_write_counts_lst = []
+        weight_read_write_counts_lst = []
+        output_read_write_counts_lst = []
+
+        def calc_read_count_wrapper(read_write_counts_lst, loop_tiling_lst, calc_read_count_func):
+            for level in range(len(loop_tiling_lst)):
+                read_write_count_dict = {"read count": 0, "write count": 0}
+
+                # get forward read counts (read counts when level n memory is read by level n-1 memory)
+                read_count = calc_read_count_func(level, loop_tiling_lst)
+                read_write_count_dict["read count"] += read_count
+
+                # get backward write counts (write counts when level n memory is written by level n+1 memory)
+                if level != 0:
+                    parent_read_write_count_dict = read_write_counts_lst[-1]
+                    read_write_count_dict["write count"] += parent_read_write_count_dict["read count"]
+
+                read_write_counts_lst.append(read_write_count_dict)
+
+        calc_read_count_wrapper(input_read_write_counts_lst, self.loop_tiling_lst, calc_input_read_count)
+        calc_read_count_wrapper(weight_read_write_counts_lst, self.loop_tiling_lst, calc_weight_read_count)
+        calc_read_count_wrapper(output_read_write_counts_lst, self.loop_tiling_lst, calc_output_read_count)
+
+        def calc_write_count_wrapper(read_write_counts_lst, write_backs, memory_type):
+            # if write back is enabled, then:
+            if memory_type in write_backs:
+                for level in range(len(read_write_counts_lst)):
+                    curr_read_write_count_dict = read_write_counts_lst[level]
+                    # if not lowest memory, then can evaluate write backs
+                    if level != len(read_write_counts_lst)-1:
+                        child_read_write_count_dict = read_write_counts_lst[level+1]
+                        curr_read_write_count_dict["write count"] += child_read_write_count_dict["write count"]
+                        child_read_write_count_dict["read count"] += child_read_write_count_dict["write count"]
+
+        calc_write_count_wrapper(input_read_write_counts_lst, self.write_backs, "input")
+        calc_write_count_wrapper(weight_read_write_counts_lst, self.write_backs, "weight")
+        calc_write_count_wrapper(output_read_write_counts_lst, self.write_backs, "output")
+
+        print("Input")
+        print(input_read_write_counts_lst)
         print()
 
-        print("Weight Memory Iteration Stats")
-        for iteration in self.memory_stats["weight"]:
-            print(iteration)
+        print("Weight")
+        print(weight_read_write_counts_lst)
         print()
 
-        print("Output Memory Iteration Stats")
-        for iteration in self.memory_stats["output"]:
-            print(iteration)
+        print("Output")
+        print(output_read_write_counts_lst)
         print()
+
+
+
+
