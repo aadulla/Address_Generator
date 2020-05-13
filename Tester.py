@@ -171,10 +171,10 @@ class Tester:
             input_memory_trace_queue  = self.sw_controller.input_trace_queue
             weight_memory_trace_queue = self.sw_controller.weight_trace_queue
             output_memory_trace_queue  = self.sw_controller.output_trace_queue
-            print("Input Trace Length:",  len(input_memory_trace_queue))
-            print("Weight Trace Length:", len(weight_memory_trace_queue))
-            print("Output Trace Length:", len(output_memory_trace_queue))
-            print()
+            # print("Input Trace Length:",  len(input_memory_trace_queue))
+            # print("Weight Trace Length:", len(weight_memory_trace_queue))
+            # print("Output Trace Length:", len(output_memory_trace_queue))
+            # print()
 
         else:
             print("Failed Correctness Check")

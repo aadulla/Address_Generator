@@ -118,6 +118,9 @@ class Memory:
         # set curr_op_space_ptr to 0 to indicate the memory_array is no longer empty
         self.curr_op_space_start_ptr = 0
 
+    def get_lowest_dim(self):
+        return list(self.dim_map[-1].items())[0][0]
+
             
     """
     "prefetch" determines how the memory should prefetch data from the parent memory as well as
@@ -169,19 +172,24 @@ class Memory:
         
         # "weight" and "output" dimensions can be grouped in the "input" dimension
         if isinstance(self, InputMemory):
-            if loop_order_lst[-1] != "channel" and loop_order_lst[-2] != "channel":
-                parent_lowest_dim = "input"
+            if loop_order_lst[-1] == "weight" or loop_order_lst[-1] == "output":
+                if my_lowest_dim == "channel":
+                    parent_lowest_dim = "input"
+                elif loop_order_lst[-2] == "channel":
+                    if (self.prev_loop_counters is None) or (self.prev_loop_counters["channel"] == loop_counters["channel"]):
+                        parent_lowest_dim = "input"
+                    else:
+                        parent_lowest_dim = "channel"
+                else:
+                    parent_lowest_dim = "input"
             else:
                 parent_lowest_dim = "channel"
         
-        # no change in op_space
-        if delta == 0:
-            return
-        
         # no data can be reused so we need to write back all the data currently in the memory and
         # then prefetch everything from the parent memory--this handles the case of prefetches
-        # for WeightMemory and OutputMemory
-        elif delta is None:
+        # for WeightMemory and OutputMemory, fresh prefetches/dimension changes for InputMemory
+        # if ((delta is None) or ((delta == 0) and (self.prev_loop_counters["channel"] != loop_counters["channel"]))):
+        if delta is None:
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1: 
                 self.write_back_op_space()
@@ -194,10 +202,14 @@ class Memory:
             self.prev_loop_counters = copy.deepcopy(loop_counters)
 
             return 1
-        
+
+        # no change in op_space
+        elif delta == 0:
+            return 0
+
         # if the dimensions are not the same, then we are moving to a completely different data space 
         # so we so need to prefetch everything new
-        elif my_lowest_dim != parent_lowest_dim or my_lowest_dim == "channel" or parent_lowest_dim == "channel":
+        elif my_lowest_dim != parent_lowest_dim:
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1:
                 self.write_back_op_space()
@@ -213,19 +225,19 @@ class Memory:
         
         # since the dimensions are the same, we are in the same subspace so can utilize delta prefetch
         elif my_lowest_dim == parent_lowest_dim:
-            
             # only input memory can have delta prefetches
             assert isinstance(self, InputMemory)
 
             # the delta is too big (i.e. the sub-subspaces are disconnected) so we need to prefectch 
             # everything new
-            if abs(delta) > my_lowest_op_space_size:
+            if abs(delta) >= my_lowest_op_space_size:
                 # check if memory array is not empty
-                if self.curr_op_space_start_ptr != -1: 
+                if self.curr_op_space_start_ptr != -1:
                     self.write_back_op_space()
 
                 # prefetch everything new from parent
-                self.positive_delta_prefetch(self.op_space_size, None, loop_counters, True)
+                num_to_prefetch = self.op_space_size // len(self.mini_memory_lst)
+                self.positive_delta_prefetch(num_to_prefetch, None, loop_counters, True)
                 self.curr_op_space_start_ptr = 0
                 self.curr_op_space_end_ptr = 0
                 self.prev_loop_counters = copy.deepcopy(loop_counters)
@@ -425,7 +437,7 @@ class Memory:
         if "input" in request.keys(): is_input = True
         else: is_input = False
         my_memory_idx = self.extract_idx_from_request(request)
-        self.write_count += 1
+        # self.write_count += 1
 
         # update trace queue
         command = {"level": self.level, "op": "load", "address": my_memory_idx}
@@ -443,7 +455,7 @@ class Memory:
     """
     def store(self, request, val):
         my_memory_idx = self.extract_idx_from_request(request)
-        self.read_count += 1
+        # self.read_count += 1
         self.memory_array[my_memory_idx] = val
 
         # update trace queue

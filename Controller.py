@@ -2,6 +2,7 @@ import numpy as np
 import copy
 import math
 import random
+import threading
 
 from Hierarchy import Hierarchy
 from RegisterFile import RegisterFile
@@ -250,10 +251,13 @@ class Controller:
                  input_memory_sizes, weight_memory_sizes, output_memory_sizes,
                  input_data, weight_data, output_data,
                  loop_tiling_lst, costs, write_backs, parallel_for_dims):
+
+        self.tmp = loop_tiling_lst
         
         self.write_backs = write_backs
         self.parallel_for_dims = parallel_for_dims
-        self.num_levels = len(input_memory_sizes)
+        # add 1 to account for not including base memory size
+        self.num_levels = len(input_memory_sizes) + 1
         
         self.loop_order_lst  = []
         self.filter_tilings  = []
@@ -315,7 +319,7 @@ class Controller:
         # memory args: memory_size, op_space_size, level, trace_queue, upper_dim_map, cost, should_write_back, write_back_policy
         input_base_memory = InputMemory(total_num_inputs, 
                                         total_num_inputs,
-                                        self.num_levels, 
+                                        self.num_levels-1, 
                                         self.input_trace_queue,
                                         self.base_dim_map_lst, 
                                         costs[0], 
@@ -326,7 +330,7 @@ class Controller:
         input_hierarchy_lst = Controller.construct_hierarchy_lst(input_memory_sizes, 
                                                                  self.op_spaces_dict,
                                                                  self.loop_order_lst,
-                                                                 self.num_levels,
+                                                                 self.num_levels-1,
                                                                  self.input_trace_queue,
                                                                  costs[1:], 
                                                                  write_backs, 
@@ -340,7 +344,7 @@ class Controller:
         # memory args: memory_size, op_space_size, level, trace_queue, upper_dim_map, cost, should_write_back, write_back_policy
         weight_base_memory = WeightMemory(total_num_weights, 
                                           total_num_weights, 
-                                          self.num_levels, 
+                                          self.num_levels-1, 
                                           self.weight_trace_queue,
                                           self.base_dim_map_lst, 
                                           costs[0], 
@@ -351,7 +355,7 @@ class Controller:
         weight_hierarchy_lst = Controller.construct_hierarchy_lst(weight_memory_sizes, 
                                                                  self.op_spaces_dict,
                                                                  self.loop_order_lst,
-                                                                 self.num_levels,
+                                                                 self.num_levels-1,
                                                                  self.weight_trace_queue,
                                                                  costs[1:],
                                                                  write_backs,
@@ -365,7 +369,7 @@ class Controller:
         # memory args: memory_size, op_space_size, level, trace_queue, upper_dim_map, cost, should_write_back, write_back_policy
         output_base_memory = OutputMemory(total_num_outputs, 
                                           total_num_outputs, 
-                                          self.num_levels, 
+                                          self.num_levels-1, 
                                           self.output_trace_queue,
                                           self.base_dim_map_lst, 
                                           costs[0], 
@@ -376,7 +380,7 @@ class Controller:
         output_hierarchy_lst = Controller.construct_hierarchy_lst(output_memory_sizes, 
                                                                  self.op_spaces_dict,
                                                                  self.loop_order_lst,
-                                                                 self.num_levels,
+                                                                 self.num_levels-1,
                                                                  self.output_trace_queue,
                                                                  costs[1:], 
                                                                  write_backs,
@@ -396,6 +400,8 @@ class Controller:
 
         # initialize parallel unrolling
         self.initialize_parallel_unrolling()
+
+        self.memory_stats = {"input": [], "weight": [], "output": []}
 
     def initialize_parallel_unrolling(self):
         # check if we should do parallel unrolling
@@ -462,6 +468,31 @@ class Controller:
                                  L0_output_memory)
             self.RFiles.append(RFile)
 
+    def log_memory_stats(self):
+
+        def get_hierarchy_stats(memory_hierarchy):
+            hierarchy_stats = []
+            for memory in memory_hierarchy:
+                read_count = 0
+                write_count = 0
+                if type(memory) == list:
+                    for parallel_memory in memory:
+                        read_count += parallel_memory.read_count
+                        write_count += parallel_memory.write_count
+                else:
+                    read_count = memory.read_count
+                    write_count = memory.write_count
+                hierarchy_stats.append({"read count": read_count, "write_count": write_count})
+            return hierarchy_stats
+
+        input_hierarchy_stats  = get_hierarchy_stats(self.input_memory_hierarchy)
+        weight_hierarchy_stats = get_hierarchy_stats(self.weight_memory_hierarchy)
+        output_hierarchy_stats = get_hierarchy_stats(self.output_memory_hierarchy)
+
+        self.memory_stats["input"].append(input_hierarchy_stats)
+        self.memory_stats["weight"].append(weight_hierarchy_stats)
+        self.memory_stats["output"].append(output_hierarchy_stats)
+
     def get_weight_prefetch_level(self, loop_order_lst):
         channel_idx = loop_order_lst.index("channel")
         filter_idx  = loop_order_lst.index("filter")
@@ -486,12 +517,17 @@ class Controller:
                                 loop_order_lst):
 
         if prev_loop_counters is None:
+            # if memory.memory_type == "output": print("prefetch output")
+            # if memory.memory_type == "weight": print("prefetch weight")
             memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
 
         else:
             for dim in memory.dependency_set:
                 if curr_loop_counters[hierarchy_index][dim] != prev_loop_counters[hierarchy_index][dim]:
+                    # if memory.memory_type == "output": print("prefetch output")
+                    # if memory.memory_type == "weight": print("prefetch weight")
                     memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
+                    break
 
     def Ln_recursive_simulate(self, hierarchy_index, debug):
 
@@ -587,28 +623,33 @@ class Controller:
                                                      curr_loop_order_lst)
 
                         # calculate input delta
-                        input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
+                        if (input_memory.get_lowest_dim() == "input"):
+                            input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
+                        else:
+                            input_curr_block_start = (channel_idx*channel_total)
                         input_delta = input_curr_block_start - input_prev_block_start
 
                         # check if this is the first time entering this loop block
                         if start:
+                            # print("prefetch input fresh")
                             # preform a fresh prefetch
                             is_fresh_prefetch = input_memory.prefetch(None, 
                                                                       self.loop_counters[hierarchy_index-1],
                                                                       curr_loop_order_lst)
 
                         else:
+                            # print("prefetch input delta", input_delta)
                             # perform a delta prefetch
                             is_fresh_prefetch = input_memory.prefetch(input_delta, 
                                                                       self.loop_counters[hierarchy_index-1],
                                                                       curr_loop_order_lst)
 
                         # check if next level is L1 and we are doing a parallel unroll
-                        if (hierarchy_index+1 == self.num_levels) and (self.parallel_for_dims is not None):
+                        if (hierarchy_index+1 == self.num_levels-1) and (self.parallel_for_dims is not None):
                             self.L0_parallel_simulate(hierarchy_index+1, debug)
 
                         # check if next level is L0
-                        elif (hierarchy_index+1 == self.num_levels+1):
+                        elif (hierarchy_index+1 == self.num_levels):
                             L0_input_memory = self.input_memory_hierarchy[-1]
                             L0_weight_memory = self.weight_memory_hierarchy[-1]
                             L0_output_memory = self.output_memory_hierarchy[-1]
@@ -623,6 +664,8 @@ class Controller:
                         start = False
 
                         prev_loop_counters = copy.deepcopy(self.loop_counters)
+
+            if hierarchy_index == 1: self.log_memory_stats()
       
         # perform write backs 
         if "input" in self.write_backs:
@@ -631,8 +674,71 @@ class Controller:
             weight_memory.write_back_op_space()
         if "output" in self.write_backs:
             output_memory.write_back_op_space()
+
           
         return
+
+    def RFile_simulate(self, 
+                       RFile, 
+                       start,
+                       debug,
+                       hierarchy_index,
+                       prev_loop_counters,
+                       curr_loop_order_lst,
+                       channel_total,
+                       filter_total,
+                       weight_total,
+                       output_total):
+
+        # overwrite loop counters with RFile assigned loop counter
+        RFile_curr_loop_counters = copy.deepcopy(self.loop_counters)
+        RFile_curr_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
+
+        if prev_loop_counters is not None:
+            RFile_prev_loop_counters = copy.deepcopy(prev_loop_counters)
+            RFile_prev_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
+        else:
+            RFile_prev_loop_counters = prev_loop_counters
+
+        channel_idx = RFile_curr_loop_counters[hierarchy_index-1]["channel"]
+        filter_idx  = RFile_curr_loop_counters[hierarchy_index-1]["filter"]
+        weight_idx  = RFile_curr_loop_counters[hierarchy_index-1]["weight"]
+        output_idx  = RFile_curr_loop_counters[hierarchy_index-1]["output"]
+
+        # prefetch weight and output memories
+        self.memory_prefetch_wrapper(RFile.weight_memory, 
+                                     hierarchy_index-1,
+                                     RFile_curr_loop_counters,
+                                     RFile_prev_loop_counters,
+                                     curr_loop_order_lst)
+
+        self.memory_prefetch_wrapper(RFile.output_memory, 
+                                     hierarchy_index-1,
+                                     RFile_curr_loop_counters,
+                                     RFile_prev_loop_counters,
+                                     curr_loop_order_lst)
+
+        # calculate input delta
+        RFile.input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
+        input_delta = RFile.input_curr_block_start - RFile.input_prev_block_start
+
+        # check if this is the first time entering this loop block
+        if start:
+            # preform a fresh prefetch
+            is_fresh_prefetch = RFile.input_memory.prefetch(None, 
+                                                            RFile_curr_loop_counters[hierarchy_index-1],
+                                                            curr_loop_order_lst)
+
+        else:
+            # perform a delta prefetch
+            is_fresh_prefetch = RFile.input_memory.prefetch(input_delta, 
+                                                            RFile_curr_loop_counters[hierarchy_index-1],
+                                                            curr_loop_order_lst)
+
+        self.L0_compute(hierarchy_index+1, debug, RFile_curr_loop_counters,
+                        RFile.input_memory, RFile.weight_memory, RFile.output_memory)
+
+        RFile.input_prev_block_start = RFile.input_curr_block_start
 
     def L0_parallel_simulate(self, hierarchy_index, debug):
 
@@ -713,59 +819,28 @@ class Controller:
                         output_total  = dim_totals["output"]
 
                         # parallel unroll all RFiles
+                        RFile_threads = []
                         for RFile in self.RFiles:
-                            # overwrite loop counters with RFile assigned loop counter
-                            RFile_curr_loop_counters = copy.deepcopy(self.loop_counters)
-                            RFile_curr_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
-
-                            if prev_loop_counters is not None:
-                                RFile_prev_loop_counters = copy.deepcopy(prev_loop_counters)
-                                RFile_prev_loop_counters[hierarchy_index-1].update(RFile.loop_counter_asst)
-                            else:
-                                RFile_prev_loop_counters = prev_loop_counters
-
-                            channel_idx = RFile_curr_loop_counters[hierarchy_index-1]["channel"]
-                            filter_idx  = RFile_curr_loop_counters[hierarchy_index-1]["filter"]
-                            weight_idx  = RFile_curr_loop_counters[hierarchy_index-1]["weight"]
-                            output_idx  = RFile_curr_loop_counters[hierarchy_index-1]["output"]
-
-                            # prefetch weight and output memories
-                            self.memory_prefetch_wrapper(RFile.weight_memory, 
-                                                         hierarchy_index-1,
-                                                         RFile_curr_loop_counters,
-                                                         RFile_prev_loop_counters,
-                                                         curr_loop_order_lst)
-
-                            self.memory_prefetch_wrapper(RFile.output_memory, 
-                                                         hierarchy_index-1,
-                                                         RFile_curr_loop_counters,
-                                                         RFile_prev_loop_counters,
-                                                         curr_loop_order_lst)
-
-                            # calculate input delta
-                            RFile.input_curr_block_start = (weight_idx*weight_total + output_idx*output_total)
-                            input_delta = RFile.input_curr_block_start - RFile.input_prev_block_start
-
-                            # check if this is the first time entering this loop block
-                            if start:
-                                # preform a fresh prefetch
-                                is_fresh_prefetch = RFile.input_memory.prefetch(None, 
-                                                                                RFile_curr_loop_counters[hierarchy_index-1],
-                                                                                curr_loop_order_lst)
-
-                            else:
-                                # perform a delta prefetch
-                                is_fresh_prefetch = RFile.input_memory.prefetch(input_delta, 
-                                                                                RFile_curr_loop_counters[hierarchy_index-1],
-                                                                                curr_loop_order_lst)
-
-                            self.L0_compute(hierarchy_index+1, debug, RFile_curr_loop_counters,
-                                            RFile.input_memory, RFile.weight_memory, RFile.output_memory)
-
-                            RFile.input_prev_block_start = RFile.input_curr_block_start
+                            RFile_threads.append(threading.Thread(target=self.RFile_simulate, 
+                                                                  args=(RFile, 
+                                                                        start,
+                                                                        debug,
+                                                                        hierarchy_index,
+                                                                        prev_loop_counters,
+                                                                        curr_loop_order_lst,
+                                                                        channel_total,
+                                                                        filter_total,
+                                                                        weight_total,
+                                                                        output_total)))
+                        for RFile_thread in RFile_threads:
+                            RFile_thread.start()
+                        for RFile_thread in RFile_threads:
+                            RFile_thread.join()
 
                     start = False
                     prev_loop_counters = copy.deepcopy(self.loop_counters)
+
+            if hierarchy_index == 1: self.log_memory_stats()
 
         # parallel unroll all RFiles
         for RFile in self.RFiles:
@@ -776,10 +851,9 @@ class Controller:
                 RFile.weight_memory.write_back_op_space()
             if "output" in self.write_backs:
                 RFile.output_memory.write_back_op_space()
+
           
         return
-
-
 
     def L0_compute(self, hierarchy_index, debug, loop_counters,
                    input_memory, weight_memory, output_memory):
@@ -1016,4 +1090,23 @@ class Controller:
         print("OUTPUT MEMORY HIERARCHY")
         print("*"*100)
         self.output_memory_hierarchy.print_stats()
+        print()
+
+        for tile in self.tmp:
+            print(tile)
+        print()
+
+        print("Input Memory Iteration Stats")
+        for iteration in self.memory_stats["input"]:
+            print(iteration)
+        print()
+
+        print("Weight Memory Iteration Stats")
+        for iteration in self.memory_stats["weight"]:
+            print(iteration)
+        print()
+
+        print("Output Memory Iteration Stats")
+        for iteration in self.memory_stats["output"]:
+            print(iteration)
         print()
