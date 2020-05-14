@@ -1,7 +1,13 @@
 """
 Closed Form Solution for Read/Write Counts Without Parallelism
--- With parallelism is supported with addition "*_L1_parallel_calc_read_count" functions
+-- With parallelism is supported with "*_L1_parallel_calc_read_count" functions
 #########################################################################################################
+
+This is the mapping of timeloop to my dimension names:
+P – output spatial coordinate
+R – weight spatial coordinate
+C – channel index
+K – filter index
 
 WeightMemory and OutputMemory have full prefetches everytime so no need to worry about delta prefetches
 
@@ -9,7 +15,7 @@ To determine the number of read counts at level n by level n-1:
     1) find full prefetch size of memory at level n-1
     2) examine loop tiling between level n and level n-1 memory
         a) find lowest dim that is in the memory's dependency set
-        b) find product from lowest dim to second highest dim of topmost loop tile
+        b) find product from lowest dim to highest dim of topmost loop tile
     3) multiply product of dims with full prefetch size
 The result is the number of read counts for the first iteration of the entire convolution
 To find total read counts, multiply by range of highest dim
@@ -28,7 +34,7 @@ To determine the number of read counts at level n by level n-1:
         b) determine number of channels and spatial size of input space
     2) exmaine loop tiling between level n and n-1 memory
     3) if lowest dim == "channel"
-        a) find "channel" dim and take product of all dims to second highest dim of topmost loop tile
+        a) find "channel" dim and take product of all dims to highest dim of topmost loop tile
         b) multiply product of dims with full prefetch size
     4) if lowest dim == "input"
         a) we know that the lowest dim in the loop tiling is either "weight" or "output"
@@ -45,21 +51,21 @@ To determine the number of read counts at level n by level n-1:
                         (channel spatial size) * (lowest dim range - 1) * (lowest dim spatial size) * (second lowest dim range - 1) +
                         (channel spatial size) * ((second lowest dim spatial size) - (lowest dim spatial size * (lowest dim range - 1))) * (second lowest dim range - 1)
                        ) * 
-                       product of all dimensions from second dim in loop tiling to second highest dim
+                       product of all dimensions from second dim in loop tiling to highest dim of topmost tile
                 c) else, need to do full prefetch
                     i) read counts:
                        (
                         full prefetch + 
                         (channel spatial size * (lowest dim range - 1) * lowest dim spatial size)
                        ) * 
-                       product of all dimensions from third (second lowest) dim in loop tiling to second highest dim
+                       product of all dimensions from third (second lowest) dim in loop tiling to highest dim of topmost tile
         e) Case 2: if second lowest dim is "channel": need to do full prefetch when changing val of channel dim
             i) read counts:
                (
                 full prefetch + 
                 (channel spatial size) * (lowest dim range - 1) * (lowest dim spatial size)
                ) * 
-               product of all dimensions from third (second lowest) dim in loop tiling to second highest dim
+               product of all dimensions from third (second lowest) dim in loop tiling to highest dim of topmost tile
 
 If we are using write backs, then:
 # of read counts to level n from level n+/-1 = # of write counts to level n-1 from level n+/-1
