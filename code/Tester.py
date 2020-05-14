@@ -198,23 +198,22 @@ class Tester:
             parallel_for_dims_set = set(self.parallel_for_dims)
         analyzer_memory_stats = read_write_count_analysis(self.loop_tiling_lst, parallel_for_dims_set, self.write_backs)
 
+        def print_memory_stats(memory_stats):
+            print("-"*50)
+            for memory_type, read_write_counts_lst in memory_stats.items():
+                print(memory_type, "hierarchy")
+                for i, read_write_count_dict in enumerate(read_write_counts_lst):
+                    level = len(read_write_counts_lst) - i - 1
+                    print("L"+str(level), end=" ")
+                    print(read_write_count_dict)
+                print("%"*50)
+            print()
+
         print("SIMULATED MEMORY STATS")
-        print("-"*50)
-        for memory_type, read_write_counts_lst in simulator_memory_stats.items():
-            print(memory_type)
-            for read_write_count_dict in read_write_counts_lst:
-                print(read_write_count_dict)
-            print("%"*50)
-        print()
+        print_memory_stats(simulator_memory_stats)
 
         print("ANALYZER MEMORY STATS")
-        print("-"*50)
-        for memory_type, read_write_counts_lst in analyzer_memory_stats.items():
-            print(memory_type)
-            for read_write_count_dict in read_write_counts_lst:
-                print(read_write_count_dict)
-            print("%"*50)
-        print()
+        print_memory_stats(analyzer_memory_stats)
 
         self.memory_stats_similarity_check(simulator_memory_stats, analyzer_memory_stats)
 
