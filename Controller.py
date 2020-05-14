@@ -504,10 +504,14 @@ class Controller:
         output_idx  = loop_order_lst.index("output")
         return max([filter_idx, output_idx])
 
-    def get_first_prefetch_level(self, loop_order_lst):
+    def get_first_prefetch_level(self, loop_order_lst, level):
         weight_prefetch_level = self.get_weight_prefetch_level(loop_order_lst)
         output_prefetch_level = self.get_output_prefetch_level(loop_order_lst)
-        return min(weight_prefetch_level, output_prefetch_level)
+
+        # return min(weight_prefetch_level, output_prefetch_level)
+        if (self.parallel_for_dims is not None) and (level == self.num_levels-1) and ("channel" in set(self.parallel_for_dims)):
+            return -1
+        return loop_order_lst.index("channel")
 
     def memory_prefetch_wrapper(self,
                                 memory,
@@ -551,11 +555,8 @@ class Controller:
         dim_idxs   = {"channel": None, "filter": None, "weight": None, "output": None}
         dim_totals = {"channel": None, "filter": None, "weight": None, "output": None}
 
-        start = False
-        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst)
-
-        curr_level = 0
-        if curr_level == first_prefetch_level: start = True
+        start = True
+        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst, hierarchy_index)
 
         self.loop_counters[hierarchy_index-1][dim_0] = 0
         self.loop_counters[hierarchy_index-1][dim_1] = 0
@@ -569,7 +570,7 @@ class Controller:
                 dim_totals[dim_0] *= tile_0
             self.loop_counters[hierarchy_index-1][dim_0] = idx_0
 
-            curr_level = 1
+            curr_level = 0
             if curr_level == first_prefetch_level: start = True
 
             for idx_1 in range(self.tilings_dict[dim_1][hierarchy_index - 1]):
@@ -579,7 +580,7 @@ class Controller:
                     dim_totals[dim_1] *= tile_1
                 self.loop_counters[hierarchy_index-1][dim_1] = idx_1
               
-                curr_level = 2
+                curr_level = 1
                 if curr_level == first_prefetch_level: start = True
 
                 for idx_2 in range(self.tilings_dict[dim_2][hierarchy_index - 1]):
@@ -589,7 +590,7 @@ class Controller:
                         dim_totals[dim_2] *= tile_2
                     self.loop_counters[hierarchy_index-1][dim_2] = idx_2
 
-                    curr_level = 3
+                    curr_level = 2
                     if curr_level == first_prefetch_level: start = True
 
                     for idx_3 in range(self.tilings_dict[dim_3][hierarchy_index - 1]):
@@ -598,6 +599,9 @@ class Controller:
                         for tile_3 in self.tilings_dict[dim_3][hierarchy_index:]:
                             dim_totals[dim_3] *= tile_3
                         self.loop_counters[hierarchy_index-1][dim_3] = idx_3
+
+                        curr_level = 3
+                        if curr_level == first_prefetch_level: start = True
 
                         channel_idx = dim_idxs["channel"]
                         filter_idx  = dim_idxs["filter"]
@@ -753,16 +757,15 @@ class Controller:
         dim_idxs   = {"channel": None, "filter": None, "weight": None, "output": None}
         dim_totals = {"channel": None, "filter": None, "weight": None, "output": None}
 
-        start = False
-        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst)
+        start = True
+        first_prefetch_level  = self.get_first_prefetch_level(curr_loop_order_lst, hierarchy_index)
       
         self.loop_counters[hierarchy_index-1][dim_0] = 0
         self.loop_counters[hierarchy_index-1][dim_1] = 0
         self.loop_counters[hierarchy_index-1][dim_2] = 0
         self.loop_counters[hierarchy_index-1][dim_3] = 0
 
-        curr_level = 0
-        if curr_level == first_prefetch_level: start = True
+        curr_level = 0;
 
         if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_0 = 1
         else: num_iters_dim_0 = self.tilings_dict[dim_0][hierarchy_index - 1]
@@ -774,9 +777,10 @@ class Controller:
                 dim_totals[dim_0] *= tile_0
             self.loop_counters[hierarchy_index-1][dim_0] = idx_0
 
-            curr_level = 1
+            curr_level = 0;
             if curr_level == first_prefetch_level: start = True
-          
+            curr_level = 1
+
             if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_1 = 1
             else: num_iters_dim_1 = self.tilings_dict[dim_1][hierarchy_index - 1]
 
@@ -787,9 +791,9 @@ class Controller:
                     dim_totals[dim_1] *= tile_1
                 self.loop_counters[hierarchy_index-1][dim_1] = idx_1
               
-                curr_level = 2
                 if curr_level == first_prefetch_level: start = True
-              
+                curr_level = 2
+
                 if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_2 = 1
                 else: num_iters_dim_2 = self.tilings_dict[dim_2][hierarchy_index - 1]
 
@@ -800,9 +804,9 @@ class Controller:
                         dim_totals[dim_2] *= tile_2
                     self.loop_counters[hierarchy_index-1][dim_2] = idx_2
 
-                    curr_level = 3
                     if curr_level == first_prefetch_level: start = True
-                  
+                    curr_level = 3
+
                     if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_3 = 1
                     else: num_iters_dim_3 = self.tilings_dict[dim_3][hierarchy_index - 1]
 
@@ -812,6 +816,8 @@ class Controller:
                         for tile_3 in self.tilings_dict[dim_3][hierarchy_index:]:
                             dim_totals[dim_3] *= tile_3
                         self.loop_counters[hierarchy_index-1][dim_3] = idx_3
+
+                        if curr_level == first_prefetch_level: start = True
                       
                         channel_total = dim_totals["channel"]
                         filter_total  = dim_totals["filter"]
@@ -1405,6 +1411,257 @@ class Controller:
         calc_read_count_wrapper(weight_read_write_counts_lst, self.loop_tiling_lst, calc_weight_read_count)
         calc_read_count_wrapper(output_read_write_counts_lst, self.loop_tiling_lst, calc_output_read_count)
 
+        def calc_L0_parallel_input_read_write_counts(input_read_write_counts_lst, loop_tiling_lst, parallel_for_dims):
+            parallel_for_dims = set(parallel_for_dims)
+            channel_op_space_size, weight_op_space_size, output_op_space_size = 1, 1, 1
+
+            L0_compute_tile = loop_tiling_lst[-1]
+            for dim_dict in L0_compute_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name == "channel": channel_op_space_size *= dim_range
+                elif dim_name == "weight": weight_op_space_size *= dim_range
+                elif dim_name == "output": output_op_space_size *= dim_range
+
+            input_op_space_size = weight_op_space_size + output_op_space_size - 1
+            full_prefetch_size = channel_op_space_size * input_op_space_size
+
+            static_dim_dict_lst = []
+            num_parallel_instances = 1
+            L0_prefetch_tile = loop_tiling_lst[-2]
+            for dim_dict in L0_prefetch_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name not in parallel_for_dims: static_dim_dict_lst.append(dim_dict)
+                if dim_name in parallel_for_dims: num_parallel_instances *= dim_range
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:-2]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            my_loop_tile = loop_tiling_lst[-2]
+
+            # determine the lowest dim
+            lowest_dim = None
+            actual_lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "channel": 
+                    lowest_dim = "channel"
+                    actual_lowest_dim = "channel"
+                    break
+                elif dim_name == "weight" or dim_name == "output": 
+                    lowest_dim = "input"
+                    actual_lowest_dim = dim_name
+                    break
+
+            L0_read_write_count_dict = input_read_write_counts_lst[-1]
+            L1_read_write_count_dict = input_read_write_counts_lst[-2]
+
+            if actual_lowest_dim not in parallel_for_dims: 
+                print(5)
+                # just need to multiply by num of parallel instances
+                L0_read_write_count_dict["write count"] *= num_parallel_instances
+                L1_read_write_count_dict["read count"] *= num_parallel_instances
+                return
+
+            else:
+                if lowest_dim == "channel":
+                    print(3)
+                    # find lowest input dim in static dims
+                    should_multiply = False
+                    for static_dim_dict in reversed(static_dim_dict_lst):
+                        dim_name, dim_range = list(static_dim_dict.items())[0]
+
+                        if dim_name == "weight" or dim_name == "output": should_multiply = True
+                        if should_multiply: upper_dim_product *= dim_range
+
+                    print(full_prefetch_size, num_parallel_instances, upper_dim_product)
+                    read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
+                    L0_read_write_count_dict["write count"] = read_count
+                    L1_read_write_count_dict["read count"] = read_count
+                    return
+
+                else:
+                    # find lowest input dim in static dims
+                    should_multiply = False
+                    for i, static_dim_dict in enumerate(reversed(static_dim_dict_lst)):
+                        dim_name, dim_range = list(static_dim_dict.items())[0]
+
+                        # have to do a full prefetch each time
+                        if dim_name == "channel": 
+                            print(2)
+                            for static_dim_dict in static_dim_dict_lst[:len(static_dim_dict_lst) - i]:
+                                print(static_dim_dict)
+                                dim_name, dim_range = list(static_dim_dict.items())[0]
+                                upper_dim_product *= dim_range
+
+                            print(full_prefetch_size, num_parallel_instances, upper_dim_product)
+
+                            read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
+                            L0_read_write_count_dict["write count"] = read_count
+                            L1_read_write_count_dict["read count"] = read_count
+                            return
+
+                        # can do a delta prefetch
+                        elif dim_name == "weight" or dim_name == "output":
+                            print(1)
+                            if dim_name == "weight": delta_op_space_size = weight_op_space_size
+                            else: delta_op_space_size = output_op_space_size * channel_op_space_size
+
+                            delta_prefetch_size = delta_op_space_size * channel_op_space_size * (dim_range-1)
+                            for static_dim_dict in static_dim_dict_lst[:len(static_dim_dict_lst) - i - 1]:
+                                dim_name, dim_range = list(static_dim_dict.items())[0]
+                                upper_dim_product *= dim_range
+
+                            read_count = (full_prefetch_size + delta_prefetch_size) * num_parallel_instances * upper_dim_product
+                            L0_read_write_count_dict["write count"] = read_count
+                            L1_read_write_count_dict["read count"] = read_count
+                            return
+
+                    print(4)
+                    # the entire loop tile is unrolled
+                    read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
+                    L0_read_write_count_dict["write count"] = read_count
+                    L1_read_write_count_dict["read count"] = read_count
+                    return
+
+        def calc_L0_parallel_weight_read_write_counts(weight_read_write_counts_lst, loop_tiling_lst, parallel_for_dims):
+            parallel_for_dims = set(parallel_for_dims)
+            print(parallel_for_dims)
+            channel_op_space_size, filter_op_space_size, weight_op_space_size = 1, 1, 1
+
+            L0_compute_tile = loop_tiling_lst[-1]
+            for dim_dict in L0_compute_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name == "channel": channel_op_space_size *= dim_range
+                elif dim_name == "filter": filter_op_space_size *= dim_range
+                elif dim_name == "weight": weight_op_space_size *= dim_range
+
+            full_prefetch_size = channel_op_space_size * filter_op_space_size * weight_op_space_size
+
+            static_dim_dict_lst = []
+            num_parallel_instances = 1
+            L0_prefetch_tile = loop_tiling_lst[-2]
+            for dim_dict in L0_prefetch_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name not in parallel_for_dims: static_dim_dict_lst.append(dim_dict)
+                if dim_name in parallel_for_dims: num_parallel_instances *= dim_range
+
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:-2]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            my_loop_tile = loop_tiling_lst[-2]
+
+            # determine the lowest dim
+            lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "channel": 
+                    lowest_dim = "channel"
+                    break
+                elif dim_name == "filter": 
+                    lowest_dim = "filter"
+                    break
+                elif dim_name == "weight": 
+                    lowest_dim = "weight"
+                    break
+
+            L0_read_write_count_dict = weight_read_write_counts_lst[-1]
+            L1_read_write_count_dict = weight_read_write_counts_lst[-2]
+
+            if lowest_dim not in parallel_for_dims: 
+                # just need to multiply by num of parallel instances
+                L0_read_write_count_dict["write count"] *= num_parallel_instances
+                L1_read_write_count_dict["read count"] *= num_parallel_instances
+                return
+
+            else:
+                # find lowest dim in static dims
+                should_multiply = False
+                for static_dim_dict in reversed(static_dim_dict_lst):
+                    dim_name, dim_range = list(static_dim_dict.items())[0]
+
+                    if dim_name == "channel" or dim_name == "filter" or dim_name == "weight": should_multiply = True
+                    if should_multiply: upper_dim_product *= dim_range
+
+                print(full_prefetch_size, num_parallel_instances, upper_dim_product)
+                read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
+                L0_read_write_count_dict["write count"] = read_count
+                L1_read_write_count_dict["read count"] = read_count
+                return
+
+        def calc_L0_parallel_output_read_write_counts(output_read_write_counts_lst, loop_tiling_lst, parallel_for_dims):
+            parallel_for_dims = set(parallel_for_dims)
+            filter_op_space_size, output_op_space_size = 1, 1
+
+            L0_compute_tile = loop_tiling_lst[-1]
+            for dim_dict in L0_compute_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name == "filter": filter_op_space_size *= dim_range
+                elif dim_name == "output": output_op_space_size *= dim_range
+
+            full_prefetch_size = filter_op_space_size * output_op_space_size
+
+            static_dim_dict_lst = []
+            num_parallel_instances = 1
+            L0_prefetch_tile = loop_tiling_lst[-2]
+            for dim_dict in L0_prefetch_tile:
+                dim_name, dim_range = list(dim_dict.items())[0]
+                if dim_name not in parallel_for_dims: static_dim_dict_lst.append(dim_dict)
+                if dim_name in parallel_for_dims: num_parallel_instances *= dim_range
+
+            upper_dim_product = 1
+            for loop_tile in loop_tiling_lst[:-2]:
+                for dim_dict in loop_tile:
+                    dim_name, dim_range = list(dim_dict.items())[0]
+                    upper_dim_product *= dim_range
+
+            my_loop_tile = loop_tiling_lst[-2]
+
+            # determine the lowest dim
+            lowest_dim = None
+            for dim_dict in reversed(my_loop_tile):
+                dim_name = list(dim_dict.keys())[0]
+                if dim_name == "filter": 
+                    lowest_dim = "filter"
+                    break
+                elif dim_name == "output": 
+                    lowest_dim = "output"
+                    break
+
+            L0_read_write_count_dict = output_read_write_counts_lst[-1]
+            L1_read_write_count_dict = output_read_write_counts_lst[-2]
+
+            if lowest_dim not in parallel_for_dims: 
+                # just need to multiply by num of parallel instances
+                L0_read_write_count_dict["write count"] *= num_parallel_instances
+                L1_read_write_count_dict["read count"] *= num_parallel_instances
+                return
+
+            else:
+                # find lowest dim in static dims
+                should_multiply = False
+                for static_dim_dict in reversed(static_dim_dict_lst):
+                    dim_name, dim_range = list(static_dim_dict.items())[0]
+
+                    if dim_name == "filter" or dim_name == "output": should_multiply = True
+                    if should_multiply: upper_dim_product *= dim_range
+
+                read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
+                L0_read_write_count_dict["write count"] = read_count
+                L1_read_write_count_dict["read count"] = read_count
+                return
+
+        if self.parallel_for_dims is not None:
+            calc_L0_parallel_input_read_write_counts(input_read_write_counts_lst, self.loop_tiling_lst, self.parallel_for_dims)
+            calc_L0_parallel_weight_read_write_counts(weight_read_write_counts_lst, self.loop_tiling_lst, self.parallel_for_dims)
+            calc_L0_parallel_output_read_write_counts(output_read_write_counts_lst, self.loop_tiling_lst, self.parallel_for_dims)
+
         def calc_write_count_wrapper(read_write_counts_lst, write_backs, memory_type):
             # if write back is enabled, then:
             if memory_type in write_backs:
@@ -1434,4 +1691,25 @@ class Controller:
 
 
 
+
+"""
+same thing except for L0 layer
+
+Weight and Output
+only look at dependency dims which are not unrolled in L0 tile
+then # of prefetches = (# of parallel instances) * (static dependency dim -> highest dim product)
+
+Input
+first get input order: channel x input or input x channel
+if lower dim is channel:
+    prefetch size * # parallel instances * (lowest static input dim -> highest dim product)
+if lower dim is input
+    determine if we can do any delta prefetches by looking at static dims
+    if lowest static input dim is channel then no delta prefetches
+        prefetch size * # parallel isntances * (lowest static input dim -> highest dim product)
+    if lowest statis input dim is weight/output then yes delta prefetches
+        (prefetch size + (delta prefetch size * lowest static input dim range - 1)) * (second lowest static input dim -> highest dim product)
+
+determine what dims can be toggled in static dims
+"""
 
