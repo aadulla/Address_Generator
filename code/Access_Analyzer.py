@@ -4,10 +4,11 @@ Closed Form Solution for Read/Write Counts Without Parallelism
 #########################################################################################################
 
 This is the mapping of timeloop to my dimension names:
-P – output spatial coordinate
-R – weight spatial coordinate
-C – channel index
-K – filter index
+P: output spatial coordinate
+R: weight spatial coordinate
+(P + R - 1): input spatial coordinate
+C: channel index
+K: filter index
 
 WeightMemory and OutputMemory have full prefetches everytime so no need to worry about delta prefetches
 
