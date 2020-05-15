@@ -146,7 +146,9 @@ class Tester:
         # run the simulation
         self.sw_simulator.run(self.debug)
 
-        # get output of simulation
+        # get simulator data
+        simulator_input = self.sw_simulator.get_base_input()
+        simulator_weight = self.sw_simulator.get_base_weight()
         simulator_output = self.sw_simulator.get_base_output()
         
         # compute the true output of the simulation
@@ -160,36 +162,69 @@ class Tester:
                     input_block = np.array(true_input_data[channel][i:i+len(true_weight_data[channel][filter])])
                     true_output_data[filter][i] += np.sum(input_block*true_weight_data[channel][filter])
         
-        # compare true output with simulator output
-        diff = true_output_data - simulator_output
-        if np.sum(diff) == 0:
-            print("Passed Correctness Check")
-            print("="*100)
-            print("="*100)
-            print()
-            self.sw_simulator.print_stats()
+        # compare true data with simulator data
+        input_diff = true_input_data - simulator_input
+        weight_diff = true_weight_data - simulator_weight
+        output_diff = true_output_data - simulator_output
 
-            input_memory_trace_queue  = self.sw_simulator.input_trace_queue
-            weight_memory_trace_queue = self.sw_simulator.weight_trace_queue
-            output_memory_trace_queue  = self.sw_simulator.output_trace_queue
-            # print("Input Trace Length:",  len(input_memory_trace_queue))
-            # print("Weight Trace Length:", len(weight_memory_trace_queue))
-            # print("Output Trace Length:", len(output_memory_trace_queue))
-            # print()
-
+        if np.sum(input_diff) == 0:
+            if np.sum(weight_diff) == 0:
+                if np.sum(output_diff) == 0:
+                    print("Passed Correctness Check")
+                    print("="*100)
+                    print("="*100)
+                    print()
+                    self.sw_simulator.print_stats()
+                else:
+                    print("Failed Correctness Check")
+                    print("="*100)
+                    print("="*100)
+                    print()
+                    print("Expected Output:")
+                    print(true_output_data)
+                    print()
+                    print("Simulator Output:")
+                    print(simulator_output)
+                    print()
+                    print("Difference:")
+                    print(output_diff)
+                    return
+            else:
+                print("Failed Correctness Check")
+                print("="*100)
+                print("="*100)
+                print()
+                print("Expected Weight:")
+                print(true_weight_data)
+                print()
+                print("Simulator Weight:")
+                print(simulator_weight)
+                print()
+                print("Difference:")
+                print(weight_diff)
+                return
         else:
             print("Failed Correctness Check")
             print("="*100)
             print("="*100)
             print()
-            print("Expected Output:")
-            print(true_output_data)
+            print("Expected Input:")
+            print(true_input_data)
             print()
-            print("Simulator Output:")
-            print(simulator_output)
+            print("Simulator Input:")
+            print(simulator_input)
             print()
             print("Difference:")
-            print(diff)
+            print(input_diff)
+            return
+
+        input_memory_trace_queue  = self.sw_simulator.input_trace_queue
+        weight_memory_trace_queue = self.sw_simulator.weight_trace_queue
+        output_memory_trace_queue  = self.sw_simulator.output_trace_queue
+        # print("Input Trace Length:",  len(input_memory_trace_queue))
+        # print("Weight Trace Length:", len(weight_memory_trace_queue))
+        # print("Output Trace Length:", len(output_memory_trace_queue))
+        # print()
 
         simulator_memory_stats = self.sw_simulator.get_memory_stats()
         if self.parallel_for_dims is None:

@@ -326,8 +326,7 @@ class Memory:
 
             # data value is getting read out of memory
             self.read_count += 1
-
-        
+   
         # set the data at my_memory_idx to None to indicate it is empty/was written back
         self.memory_array[my_memory_idx] = None
 
@@ -434,7 +433,7 @@ class Memory:
         # write back data
         for my_memory_idx, parent_memory_request in zip(my_memory_idxs, parent_memory_requests):
             self.write_backward(my_memory_idx, parent_memory_request)
-                
+
         self.clear_memory()
         self.reset_ptrs()
             
@@ -793,7 +792,7 @@ class Input_Memory(Memory):
                 self.read_backward(my_memory_idx, read_request)
 
                 # adjust the pointers
-                curr_mini_memory.decrement_ptrs(is_static)
+                curr_mini_memory.decrement_ptrs(is_static, j==0)
 
     """
     "positive_delta_prefetch" performs a prefetch in the backwards direction
@@ -863,7 +862,7 @@ class Input_Memory(Memory):
                 self.read_backward(my_memory_idx, read_request)
                 
                 # adjust the pointers
-                curr_mini_memory.increment_ptrs(is_static)
+                curr_mini_memory.increment_ptrs(is_static, j==0)
 
 """
 "Weight_Memory" is a subclass of memory designed specifcally to interface with weight data
@@ -992,7 +991,7 @@ class Weight_Memory(Memory):
                 read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset, dim_2_name: dim_2_offset}
                 self.read_backward(my_memory_idx, read_request)
 
-                curr_mini_memory.increment_ptrs(is_static)
+                curr_mini_memory.increment_ptrs(is_static, False)
   
 """
 "Output_Memory" is a subclass of memory designed specifcally to interface with output data
@@ -1118,7 +1117,7 @@ class Output_Memory(Memory):
                 read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset}
                 self.read_backward(my_memory_idx, read_request)
                 
-                curr_mini_memory.increment_ptrs(is_static)
+                curr_mini_memory.increment_ptrs(is_static, False)
 
         self.prev_memory_array = copy.deepcopy(self.memory_array)
 

@@ -103,7 +103,7 @@ class Data_Block:
             self.end = (self.start + self.size) % self.memory_size
 
     """
-    "increase_backward" expands the Data_Block in the forward direction (i.e. it grows towards the left)
+    "increase_backward" expands the Data_Block in the backward direction (i.e. it grows towards the left)
     params: None
     """
     def increase_backward(self):
@@ -111,6 +111,7 @@ class Data_Block:
             self.size += 1
             # move self.start one index left
             self.start = (self.end - self.size) % self.memory_size
+            self.write_back_parent_map -= 1
     
     """
     "reduce_forward" shrinks the Data_Block in the forward direction (i.e. it shirnks towards the right)
@@ -165,7 +166,7 @@ class Data_Block:
             self.should_increase = True
 
     """
-    "adjust_forward" adjusts the Data_Block in the backward direction as a result of the next
+    "adjust_backward" adjusts the Data_Block in the backward direction as a result of the prev
     MiniMemory encroaching on the Data_Block
     params: None
     """
@@ -183,8 +184,8 @@ class Data_Block:
     "print" prints information about the Data_Block
     """
     def print(self):
-        print("Start Ptr:", self.start)
-        print("End Ptr:", self.end)
-        print("Parent Map:", self.write_back_parent_map)
-        print("Initial:", self.initial)
-        print("Size:", self.size)
+        print("\t \t Start Ptr:", self.start)
+        print("\t \t End Ptr:", self.end)
+        print("\t \t Parent Map:", self.write_back_parent_map)
+        print("\t \t Initial:", self.initial)
+        print("\t \t Size:", self.size)

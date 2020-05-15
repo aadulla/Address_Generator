@@ -398,7 +398,6 @@ class Simulator:
         # self.prev_loop_counters = []
         for level in self.loop_order_lst:
             self.loop_counters.append({"channel": 0, "filter": 0, "weight": 0, "output": 0})
-            # self.prev_loop_counters.append({"channel": 0, "filter": 0, "weight": 0, "output": 0})
 
         # initialize parallel unrolling
         self.initialize_parallel_unrolling()
@@ -510,7 +509,6 @@ class Simulator:
         weight_prefetch_level = self.get_weight_prefetch_level(loop_order_lst)
         output_prefetch_level = self.get_output_prefetch_level(loop_order_lst)
 
-        # return min(weight_prefetch_level, output_prefetch_level)
         if (self.parallel_for_dims is not None) and (level == self.num_levels-1) and ("channel" in set(self.parallel_for_dims)):
             return -1
         return loop_order_lst.index("channel")
@@ -630,6 +628,7 @@ class Simulator:
                         else:
                             input_curr_block_start = (channel_idx*channel_total)
                         input_delta = input_curr_block_start - input_prev_block_start
+
 
                         # check if this is the first time entering this loop block
                         if start:
@@ -1001,7 +1000,6 @@ class Simulator:
         output_memory.end_trace()
 
         self.log_memory_stats()
-
 
     """
     "get_base_input" formats the flattened 1D memory array at the base input memory into a 2D

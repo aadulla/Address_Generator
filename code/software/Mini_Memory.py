@@ -74,7 +74,7 @@ class Mini_Memory:
         my_memory_idxs = []
         parent_memory_idxs = []
 
-        # get old data to write backward from back_old_data_block
+        # get old data to write backward from backward_old_data_block
         for i in range(self.backward_old_data_block.size):
             my_memory_idxs.append(self.backward_old_data_block.start)
             parent_memory_idxs.append(self.backward_old_data_block.write_back_parent_map)
@@ -151,22 +151,17 @@ class Mini_Memory:
     params:
         is_static:  boolean determining whether the curr_op_space_start_ptr should stay in the same
                     place or if it should shift with the curr_op_space_end_ptr
+        is_first:   bool indicating if this is the first mini memory touched in a prefetch
     """
-    def increment_ptrs(self, is_static):
+    def increment_ptrs(self, is_static, is_first):
         if not is_static:
             self.curr_op_space_start_ptr = (self.curr_op_space_start_ptr + 1) % self.memory_size
             self.parent_map += 1
             # since the curr_op_space_start_ptr shifted right, the backward_old_data_block must
             # expand to encapsulated the data previously at the curr_op_space_start_ptr 
+            if is_first: self.backward_old_data_block.should_increase = True
             self.backward_old_data_block.increase_forward()
         self.curr_op_space_end_ptr = (self.curr_op_space_end_ptr + 1) % self.memory_size
-    
-    # check if the start of my op space is intersecting:
-        # its backward old data block
-        # the prev mini memory's forward old data block
-        # the prev mini memory's end ptr
-
-    # return is is interesecting (bool), the self index to evict, the parent index to evict, which mini memory the intersection is in
 
     """
     "is_intersecting_backward" checks if the current mini memory would cause an internal or external
@@ -190,7 +185,7 @@ class Mini_Memory:
 
     """
     def is_intersecting_backward(self, prev_mini_memory):
-        # ret_ptr denotes the index that the where current mini memory will encorach on, so need
+        # ret_ptr denotes the index that the where current mini memory will encroach on, so need
         # to check if there is an intersection at ret_ptr
         ret_ptr = (self.curr_op_space_start_ptr - 1) % self.memory_size
 
@@ -223,11 +218,13 @@ class Mini_Memory:
     params:
         is_static:  boolean determining whether the curr_op_space_end_ptr should stay in the same
                     place or if it should shift with the curr_op_space_start_ptr
+        is_first:   bool indicating if this is the first mini memory touched in a prefetch
     """
-    def decrement_ptrs(self, is_static):
+    def decrement_ptrs(self, is_static, is_first):
         if not is_static:
             self.curr_op_space_start_ptr = (self.curr_op_space_start_ptr - 1) % self.memory_size
             self.parent_map -= 1
+            if is_first: self.forward_old_data_block.should_increase = True
             self.forward_old_data_block.increase_backward()
         self.curr_op_space_end_ptr = (self.curr_op_space_end_ptr - 1) % self.memory_size
 
@@ -238,4 +235,8 @@ class Mini_Memory:
         print("\t Op Space Size:", self.op_space_size)
         print("\t Start:", self.curr_op_space_start_ptr)
         print("\t End:", self.curr_op_space_end_ptr)
+        print("\t Backward Old Data Block")
+        self.backward_old_data_block.print()
+        print("\t Forward Old Data Block")
+        self.forward_old_data_block.print()
         print()
