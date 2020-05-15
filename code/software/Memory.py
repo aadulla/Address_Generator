@@ -2,6 +2,7 @@ import numpy as np
 import copy
 import math
 import random
+import threading
 
 from .Mini_Memory import Mini_Memory
 
@@ -84,7 +85,9 @@ class Memory:
         self.write_forward_buffer = None
 
         self.prev_loop_counters = None
-    
+
+        self.write_backward_lock = threading.Lock()
+        self.read_backward_lock = threading.Lock()
         
     """
     "clear_memory" clears the memory
@@ -307,6 +310,8 @@ class Memory:
                         is being written in
     """
     def write_backward(self, my_memory_idx, write_request):
+        self.write_backward_lock.acquire()
+
         # check if we should write back
         if self.should_write_back:
             # update trace queue
@@ -325,6 +330,8 @@ class Memory:
         
         # set the data at my_memory_idx to None to indicate it is empty/was written back
         self.memory_array[my_memory_idx] = None
+
+        self.write_backward_lock.release()
 
     """
     "read_forward" reads the data from the read_forward_buffer into the index in the memory array
@@ -365,6 +372,8 @@ class Memory:
                         is being read from in the parent
     """
     def read_backward(self, my_memory_idx, read_request):
+        self.read_backward_lock.acquire()
+
         # issue read request to parent so parent knows what value to send down
         self.read_backward_buffer.send_data_parent_to_child(read_request)
         # get data from buffer
@@ -378,6 +387,8 @@ class Memory:
         
         # data value is getting written to in memory
         self.write_count += 1
+
+        self.read_backward_lock.release()
         
     """
     "write_forward" writes the data located at the index specified in write_request. This is for
@@ -437,7 +448,7 @@ class Memory:
         if "input" in request.keys(): is_input = True
         else: is_input = False
         my_memory_idx = self.extract_idx_from_request(request)
-        # self.write_count += 1
+        self.read_count += 1
 
         # update trace queue
         command = {"level": self.level, "op": "load", "address": my_memory_idx}
@@ -455,7 +466,7 @@ class Memory:
     """
     def store(self, request, val):
         my_memory_idx = self.extract_idx_from_request(request)
-        # self.read_count += 1
+        self.write_count += 1
         self.memory_array[my_memory_idx] = val
 
         # update trace queue
@@ -479,6 +490,48 @@ class Memory:
     # end trace
     def end_trace(self):
         self.trace_queue.enque("END")
+
+    # return a deepcopy of the memory but keep pointers to buffers and locks intact
+    def deepcopy(self):
+        # save pointers to buffers and locks
+        write_backward_buffer = self.write_backward_buffer
+        read_backward_buffer = self.read_backward_buffer
+        write_forward_buffer = self.write_forward_buffer
+        read_forward_buffer = self.read_forward_buffer
+        write_backward_lock = self.write_backward_lock
+        read_backward_lock = self.read_backward_lock
+
+        # set buffers and locks to None so are not replicated in deepcopy
+        self.write_backward_buffer = None
+        self.read_backward_buffer = None
+        self.write_forward_buffer = None
+        self.read_forward_buffer = None
+        self.write_backward_lock = None
+        self.read_backward_lock = None
+
+        new_memory = copy.deepcopy(self)
+
+        # reassign pointers to self and new memory
+        self.write_backward_buffer = write_backward_buffer
+        new_memory.write_backward_buffer = write_backward_buffer
+
+        self.read_backward_buffer = read_backward_buffer
+        new_memory.read_backward_buffer = read_backward_buffer
+
+        self.write_forward_buffer = write_forward_buffer
+        new_memory.write_forward_buffer = write_forward_buffer
+
+        self.read_forward_buffer = read_forward_buffer
+        new_memory.read_forward_buffer = read_forward_buffer
+
+        self.write_backward_lock = write_backward_lock
+        new_memory.write_backward_lock = write_backward_lock
+
+        self.read_backward_lock = read_backward_lock
+        new_memory.read_backward_lock = read_backward_lock
+
+        return new_memory
+
     
     """ 
     "calc_cost" calculates the total cost of all the accesses to memory

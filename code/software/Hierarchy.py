@@ -15,9 +15,8 @@ class Hierarchy:
         for i in range(0, len(self.hierarchy_lst)-1, 1):
             parent = self.hierarchy_lst[i]
             child = self.hierarchy_lst[i+1]
-            # the buffer size is hardcoded at the child's memory size. the buffer size
-            # can be upper bounded by the child's prefetch size
-            buf_size = child.memory_size
+            # the buffer size is hardcoded at the child's prefetch size
+            buf_size = child.op_space_size
             buffer = Buffer(writer=parent, reader=child, buf_size=buf_size)
             parent.write_forward_buffer = child.read_backward_buffer = buffer
             
@@ -25,30 +24,27 @@ class Hierarchy:
         for i in range(len(self.hierarchy_lst)-1, 0, -1):
             child = self.hierarchy_lst[i]
             parent = self.hierarchy_lst[i-1]
-            # the buffer size is hardcoded at the child's memory size. the buffer size
-            # can be upper bounded by the child's prefetch size
-            buf_size = child.memory_size
+            # the buffer size is hardcoded to the child's prefetch size
+            buf_size = child.op_space_size
             buffer = Buffer(writer=child, reader=parent, buf_size=buf_size)
             child.write_backward_buffer = parent.read_forward_buffer = buffer
 
     def parallel_unroll(self, num_PEs):
         L0_memory = self.hierarchy_lst[-1]
 
-        # save pointers to L1 buffers
-        L1_write_backward_buffer = L0_memory.write_backward_buffer
-        L1_read_backward_buffer  = L0_memory.read_backward_buffer
+        # the buffers from L1 memory to all L0 parallel memories need to be extended to handle
+        # the worst case where they are filled up by prefetch requests from all L0 parallel memories
+        old_write_backward_buffer_size = L0_memory.write_backward_buffer.get_max_size()
+        new_write_backward_buffer_size = old_write_backward_buffer_size * num_PEs
+        L0_memory.write_backward_buffer.extend_max_size(new_write_backward_buffer_size)
 
-        # set buffers to None so do not deepcopy buffers when unrolling memories
-        L0_memory.write_backward_buffer = None
-        L0_memory.read_backward_buffer = None
+        old_read_backward_buffer_size = L0_memory.read_backward_buffer.get_max_size()
+        new_read_backward_buffer_size = old_read_backward_buffer_size * num_PEs
+        L0_memory.read_backward_buffer.extend_max_size(new_read_backward_buffer_size)
 
-        # create individual L0 memories for each PE
-        unrolled_L0_memories = [copy.deepcopy(L0_memory) for i in range(num_PEs)]
-        for memory in unrolled_L0_memories:
-            memory.write_backward_buffer = L1_write_backward_buffer
-            memory.read_backward_buffer  = L1_read_backward_buffer
-
+        unrolled_L0_memories = [L0_memory.deepcopy() for i in range(num_PEs)]
         self.hierarchy_lst[-1] = unrolled_L0_memories
+
 
         del L0_memory
 

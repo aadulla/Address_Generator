@@ -62,6 +62,12 @@ class Queue:
     def is_empty(self):
         return self.curr_size == 0
 
+    def extend_max_size(self, queue_size):
+        self.queue_size = queue_size
+
+    def get_max_size(self):
+        return self.queue_size
+
     def __len__(self):
         return self.curr_size
     

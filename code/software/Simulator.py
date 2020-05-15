@@ -523,15 +523,11 @@ class Simulator:
                                 loop_order_lst):
 
         if prev_loop_counters is None:
-            # if memory.memory_type == "output": print("prefetch output")
-            # if memory.memory_type == "weight": print("prefetch weight")
             memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
 
         else:
             for dim in memory.dependency_set:
                 if curr_loop_counters[hierarchy_index][dim] != prev_loop_counters[hierarchy_index][dim]:
-                    # if memory.memory_type == "output": print("prefetch output")
-                    # if memory.memory_type == "weight": print("prefetch weight")
                     memory.prefetch(None, curr_loop_counters[hierarchy_index], loop_order_lst)
                     break
 
@@ -637,14 +633,12 @@ class Simulator:
 
                         # check if this is the first time entering this loop block
                         if start:
-                            # print("prefetch input fresh")
                             # preform a fresh prefetch
                             is_fresh_prefetch = input_memory.prefetch(None, 
                                                                       self.loop_counters[hierarchy_index-1],
                                                                       curr_loop_order_lst)
 
                         else:
-                            # print("prefetch input delta", input_delta)
                             # perform a delta prefetch
                             is_fresh_prefetch = input_memory.prefetch(input_delta, 
                                                                       self.loop_counters[hierarchy_index-1],

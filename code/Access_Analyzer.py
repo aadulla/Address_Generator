@@ -10,11 +10,17 @@ R: weight spatial coordinate
 C: channel index
 K: filter index
 
+level ordering:
+memory closest to computation is L0, memory furthest away from computation is Ln
+
+inverse level ordering:
+memory closest to computation is Ln, memory furthest away from computation is L0
+
 WeightMemory and OutputMemory have full prefetches everytime so no need to worry about delta prefetches
 
-To determine the number of read counts at level n by level n-1:
-    1) find full prefetch size of memory at level n-1
-    2) examine loop tiling between level n and level n-1 memory
+To determine the number of read counts at inverse_level n by inverse_level n-1:
+    1) find full prefetch size of memory at inverse_level n-1
+    2) examine loop tiling between inverse_level n and inverse_level n-1 memory
         a) find lowest dim that is in the memory's dependency set
         b) find product from lowest dim to highest dim of topmost loop tile
     3) multiply product of dims with full prefetch size
@@ -29,11 +35,11 @@ the val of the next dimension, there is the potential for crossover (delta prefe
 a full prefetch. When the lowest dim on an InputMemory is "channel", then there will never be a delta
 prefetch and so will always have full prefetches.
 
-To determine the number of read counts at level n by level n-1: 
-    1) find full prefetch size of memory at level n-1
-        a) determine what the lowest dim of memory at level n-1 is
+To determine the number of read counts at inverse_level n by inverse_level n-1: 
+    1) find full prefetch size of memory at inverse_level n-1
+        a) determine what the lowest dim of memory at inverse_level n-1 is
         b) determine number of channels and spatial size of input space
-    2) exmaine loop tiling between level n and n-1 memory
+    2) exmaine loop tiling between inverse_level n and n-1 memory
     3) if lowest dim == "channel"
         a) find "channel" dim and take product of all dims to highest dim of topmost loop tile
         b) multiply product of dims with full prefetch size
@@ -45,7 +51,7 @@ To determine the number of read counts at level n by level n-1:
         d) Case 1: if second lowest dim is either "weight" or "output"
             i) determine the delta when crossing over from lowest dim to second lowest dim
                 a) delta = (second lowest dim spatial size) - (lowest dim spatial size * (lowest dim range - 1))
-                b) if delta is less than input spatial size of level n-1 memory, then can do delta prefetch
+                b) if delta is less than input spatial size of inverse_level n-1 memory, then can do delta prefetch
                     i) read counts:
                        (
                         full prefetch + 
@@ -69,21 +75,21 @@ To determine the number of read counts at level n by level n-1:
                product of all dimensions from third (second lowest) dim in loop tiling to highest dim of topmost tile
 
 If we are using write backs, then:
-# of read counts to level n from level n+/-1 = # of write counts to level n-1 from level n+/-1
+# of read counts to inverse_level n from inverse_level n+/-1 = # of write counts to inverse_level n-1 from inverse_level n+/-1
 
-Total read counts at level n = # of read counts from level n-1 (prefetch) + # of read counts from level n+1 (writeback)
+Total read counts at inverse_level n = # of read counts from inverse_level n-1 (prefetch) + # of read counts from inverse_level n+1 (writeback)
 """
 
-def input_per_level_calc_full_prefetch_size(op_space_sizes_dict):
+def input_per_inverse_level_calc_full_prefetch_size(op_space_sizes_dict):
     return op_space_sizes_dict["channel"] * (op_space_sizes_dict["weight"] + op_space_sizes_dict["output"] - 1) 
 
-def weight_per_level_calc_full_prefetch_size(op_space_sizes_dict):
+def weight_per_inverse_level_calc_full_prefetch_size(op_space_sizes_dict):
     return op_space_sizes_dict["channel"] * op_space_sizes_dict["filter"] * op_space_sizes_dict["weight"]
 
-def output_per_level_calc_full_prefetch_size(op_space_sizes_dict):
+def output_per_inverse_level_calc_full_prefetch_size(op_space_sizes_dict):
     return op_space_sizes_dict["filter"] * op_space_sizes_dict["output"]
 
-def input_per_level_calc_read_count(level,
+def input_per_inverse_level_calc_read_count(inverse_level,
                                     loop_tiling_lst,
                                     op_space_sizes_dict,
                                     full_prefetch_size,
@@ -94,7 +100,7 @@ def input_per_level_calc_read_count(level,
     # Case 1: lowest dependency dim is channel
     if lowest_dependency_dim == "channel":
 
-        for dim_dict in loop_tiling_lst[level]:
+        for dim_dict in loop_tiling_lst[inverse_level]:
             dim_name, dim_range = list(dim_dict.items())[0]
             upper_dim_product *= dim_range
             if dim_name == "channel": break
@@ -109,7 +115,7 @@ def input_per_level_calc_read_count(level,
         lowest_dependency_dim_names = [None, None]
         lowest_dependency_dim_ranges = [None, None]
         dependency_dim_count = 0
-        for dim_dict in reversed(loop_tiling_lst[level]):
+        for dim_dict in reversed(loop_tiling_lst[inverse_level]):
             dim_name, dim_range = list(dim_dict.items())[0]
             if dim_name in dependency_set:
                 lowest_dependency_dim_names[dependency_dim_count] = dim_name
@@ -156,7 +162,7 @@ def input_per_level_calc_read_count(level,
         total_prefetch_size = full_prefetch_size + delta_prefetch_size + crossover_delta_prefetch_size
 
         # get product of all higher dims
-        for dim_dict in loop_tiling_lst[level]:
+        for dim_dict in loop_tiling_lst[inverse_level]:
             dim_name, dim_range = list(dim_dict.items())[0]
             if dim_name == lowest_dependency_dim_names[1]: break
             upper_dim_product *= dim_range
@@ -164,7 +170,7 @@ def input_per_level_calc_read_count(level,
         read_count = total_prefetch_size * upper_dim_product
         return read_count
 
-def weight_output_per_level_calc_read_count(level,
+def weight_output_per_inverse_level_calc_read_count(inverse_level,
                                             loop_tiling_lst,
                                             op_space_sizes_dict,
                                             full_prefetch_size, 
@@ -172,7 +178,7 @@ def weight_output_per_level_calc_read_count(level,
                                             dependency_set,
                                             lowest_dependency_dim):
 
-    for dim_dict in loop_tiling_lst[level]:
+    for dim_dict in loop_tiling_lst[inverse_level]:
         dim_name, dim_range = list(dim_dict.items())[0]
         upper_dim_product *= dim_range
         if dim_name == lowest_dependency_dim: break
@@ -268,38 +274,38 @@ def weight_output_L1_parallel_calc_read_count(op_space_sizes_dict,
 
     return read_count
 
-# get the read count at a specific level
-def per_level_calc_read_count_wrapper(level, 
+# get the read count at a specific inverse_level
+def per_inverse_level_calc_read_count_wrapper(inverse_level, 
                                       loop_tiling_lst,
                                       parallel_for_dims_set,
                                       dependency_set,
-                                      per_level_calc_full_prefetch_size_func,
-                                      per_level_calc_read_count_func,
+                                      per_inverse_level_calc_full_prefetch_size_func,
+                                      per_inverse_level_calc_read_count_func,
                                       L1_parallel_calc_read_count_func):
 
-    # lowest memory is always written to (i.e. cannot read from child)
-    if level == len(loop_tiling_lst) - 1: return 0
+    # L0_memory case is handled separately
+    if inverse_level == len(loop_tiling_lst) - 1: return 0
 
     # get op space sizes for all dims
     op_space_sizes_dict = {"channel": 1, "filter": 1, "weight": 1, "output": 1}
 
-    for loop_tile in loop_tiling_lst[level+1:]:
+    for loop_tile in loop_tiling_lst[inverse_level+1:]:
         for dim_dict in loop_tile:
             dim_name, dim_range = list(dim_dict.items())[0]
             op_space_sizes_dict[dim_name] *= dim_range
 
-    # full prefetch size is specific to memory type
-    full_prefetch_size = per_level_calc_full_prefetch_size_func(op_space_sizes_dict)
-
     upper_dim_product = 1
-    for loop_tile in loop_tiling_lst[:level]:
+    for loop_tile in loop_tiling_lst[:inverse_level]:
         for dim_dict in loop_tile:
             dim_name, dim_range = list(dim_dict.items())[0]
             upper_dim_product *= dim_range
 
-    # check if we need to parallel unroll this level
+    # full prefetch size is specific to memory type
+    full_prefetch_size = per_inverse_level_calc_full_prefetch_size_func(op_space_sizes_dict)
+
+    # check if we need to parallel unroll this inverse_level
     # only applicable to L1 memory read counts because L0 memories are unrolled
-    if (parallel_for_dims_set is not None) and (level == len(loop_tiling_lst)-2):
+    if (parallel_for_dims_set is not None) and (inverse_level == len(loop_tiling_lst)-2):
         # group non-unrolled dimensions in static_dim_dict_lst
         static_dim_dict_lst = []
         num_parallel_instances = 1
@@ -311,14 +317,14 @@ def per_level_calc_read_count_wrapper(level,
 
     # determine the lowest dependency dim of memory type
     lowest_dependency_dim = None
-    for dim_dict in reversed(loop_tiling_lst[level]):
+    for dim_dict in reversed(loop_tiling_lst[inverse_level]):
         dim_name = list(dim_dict.keys())[0]
         if dim_name in dependency_set: 
             lowest_dependency_dim = dim_name
             break
     assert lowest_dependency_dim is not None
 
-    read_count = per_level_calc_read_count_func(level, 
+    read_count = per_inverse_level_calc_read_count_func(inverse_level, 
                                                 loop_tiling_lst, 
                                                 op_space_sizes_dict,
                                                 full_prefetch_size,
@@ -326,9 +332,9 @@ def per_level_calc_read_count_wrapper(level,
                                                 dependency_set,
                                                 lowest_dependency_dim)
 
-    # check if we need to parallel unroll this level
+    # check if we need to parallel unroll this inverse_level
     # only applicable to L1 memory read counts because L0 memories are unrolled
-    if (parallel_for_dims_set is not None) and (level == len(loop_tiling_lst)-2):
+    if (parallel_for_dims_set is not None) and (inverse_level == len(loop_tiling_lst)-2):
 
         # if no dependency dims are unrolled, then just scale prefetches by # of parallel instances
         if lowest_dependency_dim not in parallel_for_dims_set:
@@ -349,43 +355,60 @@ def all_levels_calc_read_count_wrapper(read_write_counts_lst,
                                        loop_tiling_lst, 
                                        parallel_for_dims_set,
                                        dependency_set,
-                                       per_level_calc_full_prefetch_size_func,
-                                       per_level_calc_read_count_func,
+                                       per_inverse_level_calc_full_prefetch_size_func,
+                                       per_inverse_level_calc_read_count_func,
                                        L1_parallel_calc_read_count_func):
 
-    for level in range(len(loop_tiling_lst)):
-        curr_level_read_write_count_dict = {"read count": 0, "write count": 0}
+    for inverse_level in range(len(loop_tiling_lst)):
+        curr_inverse_level_read_write_count_dict = {"read count": 0, "write count": 0}
 
-        # get forward read counts (read counts when level n memory is read by level n-1 memory)
-        read_count = per_level_calc_read_count_wrapper(level, 
+        # get forward read counts (read counts when inverse_level n memory is read by inverse_level n-1 memory)
+        read_count = per_inverse_level_calc_read_count_wrapper(inverse_level, 
                                                       loop_tiling_lst,
                                                       parallel_for_dims_set,
                                                       dependency_set,
-                                                      per_level_calc_full_prefetch_size_func,
-                                                      per_level_calc_read_count_func,
+                                                      per_inverse_level_calc_full_prefetch_size_func,
+                                                      per_inverse_level_calc_read_count_func,
                                                       L1_parallel_calc_read_count_func) 
 
-        curr_level_read_write_count_dict["read count"] += read_count
+        curr_inverse_level_read_write_count_dict["read count"] += read_count
 
-        # get backward write counts (write counts when level n memory is written by level n+1 memory)
-        if level != 0:
-            parent_level_read_write_count_dict = read_write_counts_lst[-1]
-            curr_level_read_write_count_dict["write count"] += parent_level_read_write_count_dict["read count"]
+        # get backward write counts (write counts when inverse_level n memory is written by inverse_level n+1 memory)
+        if inverse_level != 0:
+            parent_inverse_level_read_write_count_dict = read_write_counts_lst[-1]
+            curr_inverse_level_read_write_count_dict["write count"] += parent_inverse_level_read_write_count_dict["read count"]
 
-        read_write_counts_lst.append(curr_level_read_write_count_dict)
+        read_write_counts_lst.append(curr_inverse_level_read_write_count_dict)
 
 def all_levels_calc_write_count_wrapper(read_write_counts_lst, write_backs_set, memory_type):
     # check if write back is enabled
     if memory_type in write_backs_set:
-        for level in range(len(read_write_counts_lst)):
-            curr_level_read_write_count_dict = read_write_counts_lst[level]
+        for inverse_level in range(len(read_write_counts_lst)):
+            curr_inverse_level_read_write_count_dict = read_write_counts_lst[inverse_level]
             # if not lowest memory, then can evaluate write backs
-            if level != len(read_write_counts_lst)-1:
-                child_level_read_write_count_dict = read_write_counts_lst[level+1]
-                # in writeback, curr level is written back to with whatever it wrote to child level initially
-                curr_level_read_write_count_dict["write count"] += child_level_read_write_count_dict["write count"]
-                # in writeback, child level is read from with whatever it was written to initially
-                child_level_read_write_count_dict["read count"] += child_level_read_write_count_dict["write count"]
+            if inverse_level != len(read_write_counts_lst)-1:
+                child_inverse_level_read_write_count_dict = read_write_counts_lst[inverse_level+1]
+                # in writeback, curr inverse_level is written back to with whatever it wrote to child inverse_level initially
+                curr_inverse_level_read_write_count_dict["write count"] += child_inverse_level_read_write_count_dict["write count"]
+                # in writeback, child inverse_level is read from with whatever it was written to initially
+                child_inverse_level_read_write_count_dict["read count"] += child_inverse_level_read_write_count_dict["write count"]
+
+def L0_load_store_read_write_count(read_write_counts_lst, loop_tiling_lst, memory_type):
+    upper_dim_product = 1
+    for loop_tile in loop_tiling_lst:
+        for dim_dict in loop_tile:
+            dim_name, dim_range = list(dim_dict.items())[0]
+            upper_dim_product *= dim_range
+
+    read_count = upper_dim_product
+    read_write_counts_lst[-1]["read count"] += read_count
+
+    # for L0 output memory, it is written to every innermost loop iteration by store operation
+    # since L0 memory is never read from apart from load operation, can just increment write count by read coutn
+    # # of store operations = # of load operations
+    if memory_type == "output":
+        read_write_counts_lst[-1]["write count"] += read_count
+
 
 def read_write_count_analysis(loop_tiling_lst, parallel_for_dims_set, write_backs_set):
 
@@ -397,29 +420,33 @@ def read_write_count_analysis(loop_tiling_lst, parallel_for_dims_set, write_back
                                        loop_tiling_lst, 
                                        parallel_for_dims_set,
                                        {"channel", "weight", "output"},
-                                       input_per_level_calc_full_prefetch_size,
-                                       input_per_level_calc_read_count,
+                                       input_per_inverse_level_calc_full_prefetch_size,
+                                       input_per_inverse_level_calc_read_count,
                                        input_L1_parallel_calc_read_count)
 
     all_levels_calc_read_count_wrapper(weight_read_write_counts_lst, 
                                        loop_tiling_lst, 
                                        parallel_for_dims_set,
                                        {"channel", "filter", "weight"},
-                                       weight_per_level_calc_full_prefetch_size,
-                                       weight_output_per_level_calc_read_count,
+                                       weight_per_inverse_level_calc_full_prefetch_size,
+                                       weight_output_per_inverse_level_calc_read_count,
                                        weight_output_L1_parallel_calc_read_count)
 
     all_levels_calc_read_count_wrapper(output_read_write_counts_lst, 
                                        loop_tiling_lst, 
                                        parallel_for_dims_set,
                                        {"filter", "output"},
-                                       output_per_level_calc_full_prefetch_size,
-                                       weight_output_per_level_calc_read_count,
+                                       output_per_inverse_level_calc_full_prefetch_size,
+                                       weight_output_per_inverse_level_calc_read_count,
                                        weight_output_L1_parallel_calc_read_count)
 
     all_levels_calc_write_count_wrapper(input_read_write_counts_lst, write_backs_set, "input")
     all_levels_calc_write_count_wrapper(weight_read_write_counts_lst, write_backs_set, "weight")
     all_levels_calc_write_count_wrapper(output_read_write_counts_lst, write_backs_set, "output")
+
+    L0_load_store_read_write_count(input_read_write_counts_lst, loop_tiling_lst, "input")
+    L0_load_store_read_write_count(weight_read_write_counts_lst, loop_tiling_lst, "weight")
+    L0_load_store_read_write_count(output_read_write_counts_lst, loop_tiling_lst, "output")
 
     return {"input":  input_read_write_counts_lst,
             "weight": weight_read_write_counts_lst,
