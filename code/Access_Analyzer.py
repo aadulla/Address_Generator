@@ -90,12 +90,12 @@ def output_per_inverse_level_calc_full_prefetch_size(op_space_sizes_dict):
     return op_space_sizes_dict["filter"] * op_space_sizes_dict["output"]
 
 def input_per_inverse_level_calc_read_count(inverse_level,
-                                    loop_tiling_lst,
-                                    op_space_sizes_dict,
-                                    full_prefetch_size,
-                                    upper_dim_product,
-                                    dependency_set,
-                                    lowest_dependency_dim):
+                                            loop_tiling_lst,
+                                            op_space_sizes_dict,
+                                            full_prefetch_size,
+                                            upper_dim_product,
+                                            dependency_set,
+                                            lowest_dependency_dim):
 
     # Case 1: lowest dependency dim is channel
     if lowest_dependency_dim == "channel":
@@ -251,7 +251,7 @@ def input_L1_parallel_calc_read_count(op_space_sizes_dict,
 
         # the entire loop tile is unrolled
         read_count = full_prefetch_size * num_parallel_instances * upper_dim_product
-        return
+        return read_count
 
 def weight_output_L1_parallel_calc_read_count(op_space_sizes_dict,
                                               full_prefetch_size,
@@ -276,12 +276,12 @@ def weight_output_L1_parallel_calc_read_count(op_space_sizes_dict,
 
 # get the read count at a specific inverse_level
 def per_inverse_level_calc_read_count_wrapper(inverse_level, 
-                                      loop_tiling_lst,
-                                      parallel_for_dims_set,
-                                      dependency_set,
-                                      per_inverse_level_calc_full_prefetch_size_func,
-                                      per_inverse_level_calc_read_count_func,
-                                      L1_parallel_calc_read_count_func):
+                                              loop_tiling_lst,
+                                              parallel_for_dims_set,
+                                              dependency_set,
+                                              per_inverse_level_calc_full_prefetch_size_func,
+                                              per_inverse_level_calc_read_count_func,
+                                              L1_parallel_calc_read_count_func):
 
     # L0_memory case is handled separately
     if inverse_level == len(loop_tiling_lst) - 1: return 0
@@ -325,12 +325,12 @@ def per_inverse_level_calc_read_count_wrapper(inverse_level,
     assert lowest_dependency_dim is not None
 
     read_count = per_inverse_level_calc_read_count_func(inverse_level, 
-                                                loop_tiling_lst, 
-                                                op_space_sizes_dict,
-                                                full_prefetch_size,
-                                                upper_dim_product,
-                                                dependency_set,
-                                                lowest_dependency_dim)
+                                                        loop_tiling_lst, 
+                                                        op_space_sizes_dict,
+                                                        full_prefetch_size,
+                                                        upper_dim_product,
+                                                        dependency_set,
+                                                        lowest_dependency_dim)
 
     # check if we need to parallel unroll this inverse_level
     # only applicable to L1 memory read counts because L0 memories are unrolled
@@ -364,12 +364,12 @@ def all_levels_calc_read_count_wrapper(read_write_counts_lst,
 
         # get forward read counts (read counts when inverse_level n memory is read by inverse_level n-1 memory)
         read_count = per_inverse_level_calc_read_count_wrapper(inverse_level, 
-                                                      loop_tiling_lst,
-                                                      parallel_for_dims_set,
-                                                      dependency_set,
-                                                      per_inverse_level_calc_full_prefetch_size_func,
-                                                      per_inverse_level_calc_read_count_func,
-                                                      L1_parallel_calc_read_count_func) 
+                                                               loop_tiling_lst,
+                                                               parallel_for_dims_set,
+                                                               dependency_set,
+                                                               per_inverse_level_calc_full_prefetch_size_func,
+                                                               per_inverse_level_calc_read_count_func,
+                                                               L1_parallel_calc_read_count_func) 
 
         curr_inverse_level_read_write_count_dict["read count"] += read_count
 
@@ -451,3 +451,94 @@ def read_write_count_analysis(loop_tiling_lst, parallel_for_dims_set, write_back
     return {"input":  input_read_write_counts_lst,
             "weight": weight_read_write_counts_lst,
             "output": output_read_write_counts_lst}
+
+
+def per_level_extract_crossover_delta(inverse_level, 
+                                      loop_tiling_lst,
+                                      parallel_for_dims_set,
+                                      dependency_set):
+
+    # get op space sizes for all dims
+    op_space_sizes_dict = {"channel": 1, "filter": 1, "weight": 1, "output": 1}
+
+    for loop_tile in loop_tiling_lst[inverse_level+1:]:
+        for dim_dict in loop_tile:
+            dim_name, dim_range = list(dim_dict.items())[0]
+            op_space_sizes_dict[dim_name] *= dim_range
+
+    upper_dim_product = 1
+    for loop_tile in loop_tiling_lst[:inverse_level]:
+        for dim_dict in loop_tile:
+            dim_name, dim_range = list(dim_dict.items())[0]
+            upper_dim_product *= dim_range
+
+    # check if we need to parallel unroll this inverse_level
+    if (parallel_for_dims_set is not None) and (inverse_level == len(loop_tiling_lst)-2):
+        if "weight" in parallel_for_dims_set or "output" in parallel_for_dims_set:
+            return 0
+
+    # determine the lowest dependency dim of memory type
+    lowest_dependency_dim = None
+    for dim_dict in reversed(loop_tiling_lst[inverse_level]):
+        dim_name = list(dim_dict.keys())[0]
+        if dim_name in dependency_set: 
+            lowest_dependency_dim = dim_name
+            break
+    assert lowest_dependency_dim is not None
+
+    # Case 1: lowest dependency dim is channel
+    if lowest_dependency_dim == "channel":
+        return 0
+
+    # Case 2: lowest dependency dim is input
+    else:
+
+        # get the two lowest dependency dims
+        lowest_dependency_dim_names = [None, None]
+        lowest_dependency_dim_ranges = [None, None]
+        dependency_dim_count = 0
+        for dim_dict in reversed(loop_tiling_lst[inverse_level]):
+            dim_name, dim_range = list(dim_dict.items())[0]
+            if dim_name in dependency_set:
+                lowest_dependency_dim_names[dependency_dim_count] = dim_name
+                lowest_dependency_dim_ranges[dependency_dim_count] = dim_range
+
+                dependency_dim_count += 1
+                if dependency_dim_count == 2: break
+
+        # tracks whether the weight and output dims are adjacent in the loop tile
+        if (lowest_dependency_dim_names[0] in {"weight", "output"}) and \
+           (lowest_dependency_dim_names[1] in {"weight", "output"}):
+            is_weight_output_adjacent = True
+        else:
+            is_weight_output_adjacent = False
+
+        input_op_space_size = op_space_sizes_dict["weight"] + op_space_sizes_dict["output"] - 1
+
+        # if weight and output are adjacent, then need to determine the crossover delta
+        if is_weight_output_adjacent:
+            crossover_delta = op_space_sizes_dict[lowest_dependency_dim_names[1]] - \
+                              (op_space_sizes_dict[lowest_dependency_dim_names[0]] * (lowest_dependency_dim_ranges[0]-1))
+
+        # channel was the second lowest dependency dim, so force a full prefetch
+        else:
+            crossover_delta = input_op_space_size
+
+        # Case 2a: valid crossover delta
+        if (abs(crossover_delta) < input_op_space_size) and (crossover_delta < 0):
+            crossover_delta_prefetch_size = abs(crossover_delta) * \
+                                            op_space_sizes_dict["channel"]
+
+            return crossover_delta_prefetch_size
+
+        return 0
+
+def extract_crossover_deltas(loop_tiling_lst, parallel_for_dims_set):
+    crossover_delta_lst = [0]
+    for inverse_level in range(len(loop_tiling_lst)-1):
+        crossover_delta = per_level_extract_crossover_delta(inverse_level,
+                                                            loop_tiling_lst,
+                                                            parallel_for_dims_set,
+                                                            {"channel", "weight", "output"})
+        crossover_delta_lst.append(crossover_delta)
+    return crossover_delta_lst

@@ -13,6 +13,8 @@ from .Memory import Weight_Memory
 from .Memory import Output_Memory
 from lib.Queue import Trace_Queue
 
+num_threads = 1
+
 """
 ###################################################################################################
 LEGEND
@@ -758,7 +760,8 @@ class Simulator:
         self.loop_counters[hierarchy_index-1][dim_2] = 0
         self.loop_counters[hierarchy_index-1][dim_3] = 0
 
-        curr_level = 0;
+        curr_level = 0
+        reset_level = 3-len(self.parallel_for_dims)
 
         if 4-curr_level <= len(self.parallel_for_dims): num_iters_dim_0 = 1
         else: num_iters_dim_0 = self.tilings_dict[dim_0][hierarchy_index - 1]
@@ -783,7 +786,7 @@ class Simulator:
                 for tile_1 in self.tilings_dict[dim_1][hierarchy_index:]:
                     dim_totals[dim_1] *= tile_1
                 self.loop_counters[hierarchy_index-1][dim_1] = idx_1
-              
+                
                 if curr_level == first_prefetch_level: start = True
                 curr_level = 2
 
@@ -818,26 +821,29 @@ class Simulator:
                         output_total  = dim_totals["output"]
 
                         # parallel unroll all RFiles
-                        RFile_threads = []
-                        for RFile in self.RFiles:
-                            RFile_threads.append(threading.Thread(target=self.RFile_simulate, 
-                                                                  args=(RFile, 
-                                                                        start,
-                                                                        debug,
-                                                                        hierarchy_index,
-                                                                        prev_loop_counters,
-                                                                        curr_loop_order_lst,
-                                                                        channel_total,
-                                                                        filter_total,
-                                                                        weight_total,
-                                                                        output_total)))
-                        for RFile_thread in RFile_threads:
-                            RFile_thread.start()
-                        for RFile_thread in RFile_threads:
-                            RFile_thread.join()
+                        for thread_block in range(0, len(self.RFiles), num_threads):
+                            RFile_thread_block = []
+                            for thread_num in range(thread_block, min(thread_block+num_threads, len(self.RFiles))):
+                                RFile = self.RFiles[thread_num]
+                                RFile_thread_block.append(threading.Thread(target=self.RFile_simulate, 
+                                                                           args=(RFile, 
+                                                                                 start,
+                                                                                 debug,
+                                                                                 hierarchy_index,
+                                                                                 prev_loop_counters,
+                                                                                 curr_loop_order_lst,
+                                                                                 channel_total,
+                                                                                 filter_total,
+                                                                                 weight_total,
+                                                                                 output_total)))
+                            for RFile_thread in RFile_thread_block:
+                                RFile_thread.start()
+                            for RFile_thread in RFile_thread_block:
+                                RFile_thread.join()
 
                     start = False
                     prev_loop_counters = copy.deepcopy(self.loop_counters)
+                    curr_level = reset_level
 
         # parallel unroll all RFiles
         for RFile in self.RFiles:

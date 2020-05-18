@@ -12,28 +12,22 @@ class Tester:
     def __init__(self):
         pass
 
-    def prefetch_experiment(self, factor):
-        num_tiles = len(self.loop_tiling_lst)
-
-        base_factor = factor**(num_tiles-1)
-        for dim_dict in self.loop_tiling_lst[0]:
-            for key, val in dim_dict.items():
-                dim_dict[key] = int(val/base_factor)
-
-        for tile in self.loop_tiling_lst[1:]:
-            for dim_dict in tile:
-                for key, val in dim_dict.items():
-                    dim_dict[key] = int(val*factor)
-
-
     def setup(self, 
               loop_tiling_lst, 
               costs, 
-              expansion_factor, 
-              write_backs, 
-              prefetch_factor=None,
+              write_backs,
+              expansion_factor=0,
               parallel_for_dims=None,
               debug=False):
+
+        self.parallel_for_dims = parallel_for_dims
+        if self.parallel_for_dims is None:
+            self.parallel_for_dims_set = None
+        else:
+            self.parallel_for_dims_set = set(self.parallel_for_dims)
+
+        self.optimal_crossover_delta_expansion_lst = extract_crossover_deltas(loop_tiling_lst, self.parallel_for_dims_set)
+        self.actual_crossover_delta_expansion_lst = []
 
         num_channels = 1
         num_filters = 1
@@ -44,7 +38,7 @@ class Tester:
         input_memory_sizes = []
         weight_memory_sizes = []
         output_memory_sizes = []
-        for loop_tile in loop_tiling_lst[::-1]:
+        for i, loop_tile in enumerate(loop_tiling_lst[::-1]):
             for dim in loop_tile:
                 dim_name, dim_size = list(dim.items())[0]
                 if dim_name == "channel":
@@ -58,9 +52,13 @@ class Tester:
 
                 num_inputs = num_weights + num_outputs - 1
             
-            input_memory_sizes.insert(0, int(num_channels * num_inputs * (1 + expansion_factor)))
-            weight_memory_sizes.insert(0, int(num_channels * num_filters * num_weights * (1 + expansion_factor)))
-            output_memory_sizes.insert(0, int(num_filters * num_outputs * (1 + expansion_factor)))
+            optimal_crossover_delta_expansion = self.optimal_crossover_delta_expansion_lst[len(loop_tiling_lst)-i-1]
+            actual_crossover_delta_expansion = int(optimal_crossover_delta_expansion*expansion_factor)
+            self.actual_crossover_delta_expansion_lst.insert(0, actual_crossover_delta_expansion)
+
+            input_memory_sizes.insert(0, int((num_channels * num_inputs) + actual_crossover_delta_expansion))
+            weight_memory_sizes.insert(0, int(num_channels * num_filters * num_weights))
+            output_memory_sizes.insert(0, int(num_filters * num_outputs))
         
         # if in debug mode, initialize the base inputs, weights, and memories to be [0,1,2,...]
         if debug:
@@ -92,6 +90,10 @@ class Tester:
         print()
         print("INPUT MEMORY SIZES:")
         print(input_memory_sizes)
+        print("Optimal Expansion at each level:")
+        print(self.optimal_crossover_delta_expansion_lst)
+        print("Actual Expansion at each level:")
+        print(self.actual_crossover_delta_expansion_lst)
         print("*"*100)
         print()
         
@@ -122,13 +124,7 @@ class Tester:
         self.loop_tiling_lst = loop_tiling_lst
         self.costs = costs
         self.write_backs = write_backs
-        self.parallel_for_dims = parallel_for_dims
         self.debug = debug
-
-        # print("Before", self.loop_tiling_lst)
-        # if prefetch_factor is not None and prefetch_factor != 0:
-        #     self.prefetch_experiment(prefetch_factor)
-        # print("After", self.loop_tiling_lst)
 
     def test_software(self):
         
@@ -227,11 +223,7 @@ class Tester:
         # print()
 
         simulator_memory_stats = self.sw_simulator.get_memory_stats()
-        if self.parallel_for_dims is None:
-            parallel_for_dims_set = None
-        else:
-            parallel_for_dims_set = set(self.parallel_for_dims)
-        analyzer_memory_stats = read_write_count_analysis(self.loop_tiling_lst, parallel_for_dims_set, self.write_backs)
+        analyzer_memory_stats = read_write_count_analysis(self.loop_tiling_lst, self.parallel_for_dims_set, self.write_backs)
 
         def print_memory_stats(memory_stats):
             print("-"*50)
@@ -253,12 +245,17 @@ class Tester:
         self.memory_stats_similarity_check(simulator_memory_stats, analyzer_memory_stats)
 
     def memory_stats_similarity_check(self, simulator_memory_stats, analyzer_memory_stats):
+        failed = False
         for (_, simulator_read_write_counts_lst), (_, analyzer_read_write_counts_lst) in zip(simulator_memory_stats.items(), analyzer_memory_stats.items()):
             for simulator_read_write_count_dict, analyzer_read_write_count_dict in zip(simulator_read_write_counts_lst, analyzer_read_write_counts_lst):
-                assert simulator_read_write_count_dict["read count"] == analyzer_read_write_count_dict["read count"]
-                assert simulator_read_write_count_dict["write count"] == analyzer_read_write_count_dict["write count"]
+                if (simulator_read_write_count_dict["read count"] != analyzer_read_write_count_dict["read count"]):
+                    print("Failed Memory Stats Similarity Check")
+                    failed = True
+                if (simulator_read_write_count_dict["write count"] != analyzer_read_write_count_dict["write count"]):
+                    print("Failed Memory Stats Similarity Check")
+                    failed = True
 
-        print("Passed Memory Stats Similarity Check")
+        if not failed: print("Passed Memory Stats Similarity Check")
 
 
     def test_hardware(self):

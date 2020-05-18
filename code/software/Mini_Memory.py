@@ -127,23 +127,22 @@ class Mini_Memory:
         if is_intersecting:
             next_mini_memory.backward_old_data_block.adjust_forward()
             self.forward_old_data_block.adjust_forward()
-            return True, ret_ptr, write_back_parent_map, +1
+            return True, True, ret_ptr, write_back_parent_map, +1
 
         # Case 2
         if self.curr_op_space_end_ptr == next_mini_memory.curr_op_space_start_ptr:
             next_mini_memory.backward_old_data_block.adjust_forward()
             self.forward_old_data_block.adjust_forward()
-            return True, ret_ptr, next_mini_memory.parent_map, +1
+            return True, True, ret_ptr, next_mini_memory.parent_map, +1
 
         # Case 3
         is_intersecting, write_back_parent_map = self.forward_old_data_block.is_intersecting_forward(self.curr_op_space_end_ptr)
         if is_intersecting:
-            next_mini_memory.backward_old_data_block.adjust_forward()
             self.forward_old_data_block.adjust_forward()
-            return True, ret_ptr, write_back_parent_map, +0
+            return False, False, ret_ptr, None, +0
         
         self.forward_old_data_block.adjust_forward()
-        return False, ret_ptr, None, 0
+        return False, True, ret_ptr, None, 0
 
     """
     "increment_ptrs" adjust the pointers of the mini memory in the forward direction (i.e. to the right)
@@ -194,23 +193,22 @@ class Mini_Memory:
         if is_intersecting:
             prev_mini_memory.forward_old_data_block.adjust_backward()
             self.backward_old_data_block.adjust_backward()
-            return True, ret_ptr, write_back_parent_map, -1
+            return True, True, ret_ptr, write_back_parent_map, -1
 
         # Case 2
         if self.curr_op_space_start_ptr == prev_mini_memory.curr_op_space_end_ptr:
             prev_mini_memory.forward_old_data_block.adjust_backward()
             self.backward_old_data_block.adjust_backward()
-            return True, ret_ptr, prev_mini_memory.parent_map + prev_mini_memory.op_space_size - 1, -1 
+            return True, True, ret_ptr, prev_mini_memory.parent_map + prev_mini_memory.op_space_size - 1, -1 
 
         # Case 3
         is_intersecting, write_back_parent_map = self.backward_old_data_block.is_intersecting_backward(self.curr_op_space_start_ptr)
         if is_intersecting:
-            prev_mini_memory.forward_old_data_block.adjust_backward()
             self.backward_old_data_block.adjust_backward()
-            return True, ret_ptr, write_back_parent_map, +0
+            return False, False, ret_ptr, None, +0
     
         self.backward_old_data_block.adjust_backward()
-        return False, ret_ptr, None, 0
+        return False, True, ret_ptr, None, 0
 
     """
     "decrement_ptrs" adjust the pointers of the mini memory in the backward direction (i.e. to the left)

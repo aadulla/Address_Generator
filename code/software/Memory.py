@@ -171,27 +171,26 @@ class Memory:
         my_lowest_dim, my_lowest_op_space_size = list(self.dim_map[-1].items())[0]
         
         # get the lowest loop counter dimension in the loop block directly above the memory
-        parent_lowest_dim = loop_order_lst[-1]
+        # parent_lowest_dim = loop_order_lst[-1]
         
-        # "weight" and "output" dimensions can be grouped in the "input" dimension
-        if isinstance(self, Input_Memory):
-            if loop_order_lst[-1] == "weight" or loop_order_lst[-1] == "output":
-                if my_lowest_dim == "channel":
-                    parent_lowest_dim = "input"
-                elif loop_order_lst[-2] == "channel":
-                    if (self.prev_loop_counters is None) or (self.prev_loop_counters["channel"] == loop_counters["channel"]):
-                        parent_lowest_dim = "input"
-                    else:
-                        parent_lowest_dim = "channel"
-                else:
-                    parent_lowest_dim = "input"
-            else:
-                parent_lowest_dim = "channel"
+        # # "weight" and "output" dimensions can be grouped in the "input" dimension
+        # if isinstance(self, Input_Memory):
+        #     if loop_order_lst[-1] == "weight" or loop_order_lst[-1] == "output":
+        #         if my_lowest_dim == "channel":
+        #             parent_lowest_dim = "input"
+        #         elif loop_order_lst[-2] == "channel":
+        #             if (self.prev_loop_counters is None) or (self.prev_loop_counters["channel"] == loop_counters["channel"]):
+        #                 parent_lowest_dim = "input"
+        #             else:
+        #                 parent_lowest_dim = "channel"
+        #         else:
+        #             parent_lowest_dim = "input"
+        #     else:
+        #         parent_lowest_dim = "channel"
         
         # no data can be reused so we need to write back all the data currently in the memory and
         # then prefetch everything from the parent memory--this handles the case of prefetches
         # for Weight_Memory and Output_Memory, fresh prefetches/dimension changes for Input_Memory
-        # if ((delta is None) or ((delta == 0) and (self.prev_loop_counters["channel"] != loop_counters["channel"]))):
         if delta is None:
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1: 
@@ -212,7 +211,8 @@ class Memory:
 
         # if the dimensions are not the same, then we are moving to a completely different data space 
         # so we so need to prefetch everything new
-        elif my_lowest_dim != parent_lowest_dim:
+        # elif my_lowest_dim != parent_lowest_dim:
+        elif my_lowest_dim == "channel":
             # check if memory array is not empty
             if self.curr_op_space_start_ptr != -1:
                 self.write_back_op_space()
@@ -227,7 +227,8 @@ class Memory:
             return 1
         
         # since the dimensions are the same, we are in the same subspace so can utilize delta prefetch
-        elif my_lowest_dim == parent_lowest_dim:
+        # elif my_lowest_dim == parent_lowest_dim:
+        else:
             # only input memory can have delta prefetches
             assert isinstance(self, Input_Memory)
 
@@ -761,7 +762,7 @@ class Input_Memory(Memory):
             # iterate through all the mini memories
             for j, (curr_mini_memory, prev_mini_memory) in enumerate(zip(reversed_curr_mini_memory_lst, reversed_prev_mini_memory_lst)):
                 # evaluate if there is an intersection between curr mini memory and prev mini memory
-                is_intersecting, my_memory_idx, parent_idx, mini_memory_offset = curr_mini_memory.is_intersecting_backward(prev_mini_memory)
+                is_intersecting, should_read, my_memory_idx, parent_idx, mini_memory_offset = curr_mini_memory.is_intersecting_backward(prev_mini_memory)
                 
                 reversed_j = self.num_mini_memories - j - 1
 
@@ -779,17 +780,18 @@ class Input_Memory(Memory):
                     # send data back to the parent
                     self.write_backward(my_memory_idx, write_request)
 
-                # create the read request
-                dim_0_name = "channel"
-                dim_0_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + \
-                               reversed_j % self.num_mini_memories
-                dim_1_name = "input"
-                dim_1_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
-                                loop_counters["output"] * self.dim_map_dict["output"])  + jump - i - 1
-                read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset}
+                if should_read:
+                    # create the read request
+                    dim_0_name = "channel"
+                    dim_0_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + \
+                                   reversed_j % self.num_mini_memories
+                    dim_1_name = "input"
+                    dim_1_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
+                                    loop_counters["output"] * self.dim_map_dict["output"])  + jump - i - 1
+                    read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset}
 
-                # read data from the parent
-                self.read_backward(my_memory_idx, read_request)
+                    # read data from the parent
+                    self.read_backward(my_memory_idx, read_request)
 
                 # adjust the pointers
                 curr_mini_memory.decrement_ptrs(is_static, j==0)
@@ -817,7 +819,7 @@ class Input_Memory(Memory):
             # iterate through all the mini memories
             for j, (curr_mini_memory, next_mini_memory) in enumerate(zip(self.mini_memory_lst, next_mini_memory_lst)):
                 # evaluate if there is an intersection between curr mini memory and next mini memory
-                is_intersecting, my_memory_idx, parent_idx, mini_memory_offset = curr_mini_memory.is_intersecting_forward(next_mini_memory)
+                is_intersecting, should_read, my_memory_idx, parent_idx, mini_memory_offset = curr_mini_memory.is_intersecting_forward(next_mini_memory)
                 
                 # check if there was in intersection
                 if is_intersecting:
@@ -841,25 +843,26 @@ class Input_Memory(Memory):
 
                     # send data back to the parent
                     self.write_backward(my_memory_idx, write_request)
-                                    
-                # create the read request
-                if (self.is_input_last):
-                    dim_0_name = "channel"
-                    dim_0_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + j
-                    dim_1_name = "input"
-                    dim_1_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
-                                    loop_counters["output"] * self.dim_map_dict["output"]) + jump + i
-                else:
-                    dim_0_name = "input"
-                    dim_0_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
-                                    loop_counters["output"] * self.dim_map_dict["output"]) + j
-                    dim_1_name = "channel"
-                    dim_1_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + jump + i
 
-                read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset}
+                if (should_read):      
+                    # create the read request
+                    if (self.is_input_last):
+                        dim_0_name = "channel"
+                        dim_0_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + j
+                        dim_1_name = "input"
+                        dim_1_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
+                                        loop_counters["output"] * self.dim_map_dict["output"]) + jump + i
+                    else:
+                        dim_0_name = "input"
+                        dim_0_offset = (loop_counters["weight"] * self.dim_map_dict["weight"] + \
+                                        loop_counters["output"] * self.dim_map_dict["output"]) + j
+                        dim_1_name = "channel"
+                        dim_1_offset = loop_counters["channel"] * self.dim_map_dict["channel"] + jump + i
 
-                # read data from the parent
-                self.read_backward(my_memory_idx, read_request)
+                    read_request = {dim_0_name: dim_0_offset, dim_1_name: dim_1_offset}
+
+                    # read data from the parent
+                    self.read_backward(my_memory_idx, read_request)
                 
                 # adjust the pointers
                 curr_mini_memory.increment_ptrs(is_static, j==0)
@@ -972,7 +975,7 @@ class Weight_Memory(Memory):
         
         for i in range(num_to_prefetch):
             for j, (curr_mini_memory, next_mini_memory) in enumerate(zip(self.mini_memory_lst, next_mini_memory_lst)):
-                is_intersecting, my_memory_idx, parent_idx, _ = curr_mini_memory.is_intersecting_forward(next_mini_memory)
+                is_intersecting, _, my_memory_idx, parent_idx, _ = curr_mini_memory.is_intersecting_forward(next_mini_memory)
 
                 dim_0_name, dim_0_size = list(self.dim_map[0].items())[0]
                 dim_1_name, dim_1_size = list(self.dim_map[1].items())[0]
@@ -1101,7 +1104,7 @@ class Output_Memory(Memory):
         
         for i in range(num_to_prefetch):
             for j, (curr_mini_memory, next_mini_memory) in enumerate(zip(self.mini_memory_lst, next_mini_memory_lst)):
-                is_intersecting, my_memory_idx, parent_idx, _ = curr_mini_memory.is_intersecting_forward(next_mini_memory)
+                is_intersecting, _, my_memory_idx, parent_idx, _ = curr_mini_memory.is_intersecting_forward(next_mini_memory)
 
                 dim_0_name, dim_0_size = list(self.dim_map[0].items())[0]
                 dim_1_name, dim_1_size = list(self.dim_map[1].items())[0]
